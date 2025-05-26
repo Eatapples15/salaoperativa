@@ -1,1 +1,6 @@
-
+Flask
+python-telegram-bot==20.X.X # Sostituisci con la versione specifica che stai usando, es. 20.3
+requests
+beautifulsoup4
+lxml # Per BeautifulSoup, è un parser più veloce
+APScheduler
