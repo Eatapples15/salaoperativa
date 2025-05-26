@@ -2,16 +2,15 @@ from flask import Flask, render_template, jsonify, request
 from threading import Thread
 import datetime
 import os
-import asyncio # Assicurati che asyncio sia importato
+import asyncio
 import logging
 
 # Importa le funzioni e l'istanza dell'applicazione dal bot_core
 from bot_core import (
     init_telegram_application,
     send_bollettino_update_to_telegram,
-    run_bot_polling,
     setup_scheduler,
-    application # L'istanza dell'applicazione Telegram, inizializzata in bot_core.py
+    application # L'istanza dell'applicazione Telegram
 )
 
 # Configurazione del logging per app.py
@@ -20,17 +19,19 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# --- Stato del bot per la dashboard (persistenza in memoria, non tra riavvii) ---
+# --- Stato del bot per la dashboard (persistenza in memoria) ---
 bot_status = {
     "lastManualRun": None,
     "lastAutomaticCheck": None,
     "lastOperationFeedback": {"success": None, "message": "Nessuna operazione recente."},
-    "botRunning": False
+    "botRunning": False # Verrà impostato a True dopo l'inizializzazione del webhook
 }
+
+# Variabile globale per l'URL del webhook, che Render ci fornisce
+WEBHOOK_URL = None
 
 # Funzione per eseguire le coroutine asincrone del bot in un thread separato.
 def _run_async_in_thread(coro):
-    # NON NECESSARIO MODIFICARE QUI
     asyncio.run(coro)
 
 # Route per servire la pagina HTML della dashboard
@@ -43,8 +44,7 @@ def dashboard():
 def trigger_manual_update():
     global bot_status
     
-    # Questo controllo è cruciale
-    if not application or not bot_status["botRunning"]: # Aggiunto controllo bot_status["botRunning"]
+    if not application or not bot_status["botRunning"]:
         logger.error("Tentativo di attivare il bot ma l'applicazione Telegram non è inizializzata o non risulta in esecuzione.")
         bot_status["lastOperationFeedback"] = {"success": False, "message": "Il bot non è attivo. Controlla i log di Render per gli errori di avvio."}
         return jsonify({"success": False, "message": "Il bot non è ancora stato inizializzato. Riprova tra un momento o controlla i log."}), 500
@@ -67,52 +67,93 @@ def trigger_manual_update():
 def get_bot_status():
     return jsonify(bot_status)
 
-# Funzione per avviare il bot Telegram e lo scheduler in un thread dedicato.
-def run_telegram_bot_and_scheduler():
+# NUOVO ENDPOINT PER IL WEBHOOK DI TELEGRAM
+@app.route('/telegram', methods=['POST'])
+async def telegram_webhook():
     """
-    Inizializza e avvia il bot Telegram e lo scheduler in un thread separato.
-    Crea un nuovo event loop per questo thread.
+    Gestisce gli aggiornamenti in arrivo da Telegram tramite webhook.
     """
-    global bot_status
-    # *** MODIFICA CRUCIALE QUI ***
-    try:
-        # Crea un nuovo event loop per questo thread e lo imposta come corrente
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        logger.info("Nuovo asyncio event loop creato e impostato per il thread del bot.")
+    global application
+    if not application:
+        logger.error("Webhook ricevuto ma applicazione Telegram non inizializzata.")
+        return jsonify({"status": "error", "message": "Bot non attivo."}), 500
 
-        # Inizializza l'applicazione Telegram (crea l'istanza del bot)
+    try:
+        # Passa l'aggiornamento a PTB per l'elaborazione
+        # PTB si aspetta la richiesta HTTP grezza, non solo il JSON
+        await application.update_queue.put(
+            # Utilizza una classe Update.webhook_x per creare l'oggetto Update
+            # da una richiesta HTTP. `post_body` è il JSON grezzo.
+            # `data` contiene gli header
+            # `url` è l'URL a cui telegram sta inviando il webhook.
+            # Python-Telegram-Bot 20.x semplifica la gestione del webhook.
+            # L'argomento della richiesta è il corpo JSON, non il request object intero di Flask.
+            Update.de_json(request.get_json(force=True), application.bot)
+        )
+        logger.info("Aggiornamento Telegram ricevuto e messo in coda per l'elaborazione.")
+        return jsonify({"status": "success"})
+    except Exception as e:
+        logger.exception(f"Errore nella gestione del webhook Telegram: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# Funzione per avviare il bot Telegram (Ora solo webhooks e scheduler)
+def run_telegram_bot_and_scheduler_webhooks():
+    """
+    Inizializza e avvia il bot Telegram (modalità webhook) e lo scheduler.
+    """
+    global bot_status, WEBHOOK_URL
+    try:
         app_instance = init_telegram_application()
         if app_instance:
+            # Configura lo scheduler
             setup_scheduler(app_instance)
             
-            # Questo logger è importante per vedere se il bot effettivamente "parte"
-            logger.info("Bot Telegram e Scheduler avviati nel thread di background.")
+            # --- Configurazione Webhook ---
+            # Render imposta la variabile d'ambiente RENDER_EXTERNAL_HOSTNAME.
+            # Usala per costruire l'URL del webhook pubblico.
+            render_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+            if not render_hostname:
+                logger.error("RENDER_EXTERNAL_HOSTNAME non impostato. Impossibile configurare il webhook.")
+                bot_status["botRunning"] = False
+                return
+
+            WEBHOOK_URL = f"https://{render_hostname}/telegram"
+            
+            # Imposta il webhook su Telegram
+            # Usiamo application.bot.set_webhook, che è una coroutine, quindi dobbiamo awaited.
+            # Questo deve essere eseguito in un event loop.
+            asyncio.run(app_instance.bot.set_webhook(url=WEBHOOK_URL))
+            logger.info(f"Webhook Telegram impostato su: {WEBHOOK_URL}")
+
+            # PTB per i webhooks necessita di essere eseguito in un loop di background per processare gli aggiornamenti.
+            # Il metodo `run_webhook` è il successore di `run_polling` per i webhooks.
+            # Nota: `run_webhook` NON blocca, bensì avvia un loop di background per la gestione degli aggiornamenti.
+            # Quindi, il thread non si bloccherà qui.
+            asyncio.run(app_instance.run_webhook())
+            
             bot_status["botRunning"] = True
             bot_status["lastAutomaticCheck"] = datetime.datetime.now().isoformat()
-            
-            # Avvia il polling del bot. Questo blocco il thread in questo punto.
-            run_bot_polling()
+            logger.info("Bot Telegram avviato in modalità webhook e Scheduler attivo.")
+
         else:
             logger.error("Impossibile avviare bot e scheduler: applicazione Telegram non inizializzata.")
             bot_status["botRunning"] = False
     except Exception as e:
-        logger.exception(f"Errore critico nell'avvio del thread del bot/scheduler: {e}")
+        logger.exception(f"Errore critico nell'avvio del bot/scheduler (webhook): {e}")
         bot_status["botRunning"] = False
-    finally:
-        # Assicurati che l'event loop venga chiuso quando il thread termina
-        if 'loop' in locals() and not loop.is_closed():
-            loop.close()
-            logger.info("Asyncio event loop del bot chiuso.")
-
 
 # Punto di ingresso dell'applicazione Flask
 if __name__ == '__main__':
     # Avvia il bot Telegram e lo scheduler in un thread separato.
-    bot_thread = Thread(target=run_telegram_bot_and_scheduler)
-    bot_thread.daemon = True # Permette al thread di chiudersi con l'applicazione principale
+    # Il thread.daemon = True fa sì che il thread del bot si chiuda
+    # automaticamente quando l'applicazione Flask principale si chiude.
+    bot_thread = Thread(target=run_telegram_bot_and_scheduler_webhooks) # Modificato il target
+    bot_thread.daemon = True
     bot_thread.start()
 
+    # Avvia il server Flask.
     logger.info("Avvio del server Flask...")
-    # Render imposterà la variabile d'ambiente PORT.
+    # host='0.0.0.0' per renderlo accessibile dall'esterno su Render.com.
+    # port=os.getenv('PORT', 5000) usa la porta fornita da Render (o 5000 di default).
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=os.getenv('FLASK_DEBUG', 'False') == 'True')
