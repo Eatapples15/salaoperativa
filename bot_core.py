@@ -7,13 +7,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import datetime
 import os
 import asyncio
+import signal # Aggiungi questa importazione
 
 # --- Configurazione del Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Variabili d'Ambiente ---
-# LEGGI LE VARIABILI D'AMBIENTE USANDO IL LORO NOME (KEY), NON IL LORO VALORE!
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CANALE_PROTEZIONE_CIVILE_ID = os.getenv("CANALE_PROTEZIONE_CIVILE_ID")
 URL_BOLLETTINO = "https://centrofunzionale.regione.basilicata.it/it/bollettini-avvisi.php?lt=A"
@@ -55,41 +55,27 @@ async def get_bollettino_info():
         response = requests.get(URL_BOLLETTINO, timeout=15) # Aumentato il timeout
         response.raise_for_status() # Lancia un'eccezione per risposte HTTP con errori (4xx, 5xx)
 
-        # Utilizza 'html.parser' per una maggiore compatibilità, anche se 'lxml' è più veloce se disponibile.
         soup = BeautifulSoup(response.text, 'html.parser')
 
         bollettino_link = None
         bollettino_date = None
 
-        # --- LOGICA DI WEB SCRAPING SPECIFICA PER IL SITO ---
-        # Devi ispezionare il codice HTML del sito (con F12 nel browser) per trovare gli elementi corretti.
-        # Basato su un'ispezione comune di siti PA, cerchiamo un link che contenga "bollettino"
-        # e una data associata.
-        
-        # Cerca il div che contiene i bollettini. Spesso hanno una classe specifica.
-        # Ad esempio, sul sito che hai indicato, ci sono blocchi <div class="list-item">
         list_items = soup.find_all('div', class_='list-item')
 
         for item in list_items:
-            # Cerca un link (<a>) all'interno di questo 'list-item' che ha come target='_blank'
-            # e il cui testo (o href) contenga la parola 'bollettino'.
             link_element = item.find('a', href=True)
             if link_element and 'bollettino' in link_element.get_text(strip=True).lower():
                 bollettino_link = link_element['href']
                 
-                # Cerca la data, che potrebbe essere in un elemento <small> o <span> vicino al link.
-                # Questa parte è molto sensibile alle modifiche del sito.
-                date_element = item.find('small') # Assumiamo che la data sia in un tag <small>
+                date_element = item.find('small')
                 if date_element:
                     date_str = date_element.get_text(strip=True)
-                    # Converti la stringa data (es. '26/05/2025') in un oggetto datetime.date
                     try:
                         bollettino_date = datetime.datetime.strptime(date_str, "%d/%m/%Y").date()
                     except ValueError:
                         logger.warning(f"Formato data non riconosciuto '{date_str}'. Impossibile parsare la data.")
                         bollettino_date = None
                 
-                # Se abbiamo trovato un link e una data validi, possiamo fermarci qui (prendiamo il primo)
                 if bollettino_link and bollettino_date:
                     break
         
@@ -113,7 +99,6 @@ async def get_bollettino_info():
 async def send_bollettino_update_to_telegram(app_instance: Application):
     """
     Controlla se c'è un nuovo bollettino e, se sì, lo invia al canale Telegram.
-    Questa funzione viene chiamata sia dallo scheduler che dal comando manuale.
     """
     global last_processed_bollettino_date
     
@@ -123,7 +108,6 @@ async def send_bollettino_update_to_telegram(app_instance: Application):
     if link and current_bollettino_date:
         logger.info(f"Bollettino trovato: Data={current_bollettino_date}, Link={link}")
         
-        # Confronta la data del bollettino trovato con l'ultima data processata
         if last_processed_bollettino_date is None or current_bollettino_date > last_processed_bollettino_date:
             message = (
                 f"**🚨 AGGIORNAMENTO BOLLETTINO CRITICITÀ 🚨**\n\n"
@@ -133,7 +117,6 @@ async def send_bollettino_update_to_telegram(app_instance: Application):
             )
             try:
                 if CANALE_PROTEZIONE_CIVILE_ID:
-                    # Assicurati che CANALE_PROTEZIONE_CIVILE_ID sia un intero per chat_id
                     try:
                         chat_id_int = int(CANALE_PROTEZIONE_CIVILE_ID)
                     except ValueError:
@@ -141,13 +124,13 @@ async def send_bollettino_update_to_telegram(app_instance: Application):
                         return {"success": False, "message": "ID canale Telegram non valido."}
 
                     await app_instance.bot.send_message(
-                        chat_id=chat_id_int, # Usa l'ID convertito a intero
+                        chat_id=chat_id_int,
                         text=message,
                         parse_mode='Markdown',
-                        disable_web_page_preview=True # Per non mostrare l'anteprima del link
+                        disable_web_page_preview=True
                     )
                     logger.info(f"Bollettino {current_bollettino_date.strftime('%d/%m/%Y')} inviato al canale {CANALE_PROTEZIONE_CIVILE_ID}")
-                    last_processed_bollettino_date = current_bollettino_date # Aggiorna l'ultima data processata
+                    last_processed_bollettino_date = current_bollettino_date
                     return {"success": True, "message": f"Bollettino {current_bollettino_date.strftime('%d/%m/%Y')} controllato e inviato (nuovo)."}
                 else:
                     logger.error("CANALE_PROTEZIONE_CIVILE_ID non impostato. Impossibile inviare il messaggio.")
@@ -186,7 +169,22 @@ def run_bot_polling():
         logger.info("Avvio del polling del bot Telegram...")
         application.add_handler(CommandHandler("start", start_command))
         application.add_handler(CommandHandler("aggiorna", aggiorna_manuale_command))
-        # Avvia il bot. Questo è un ciclo bloccante, quindi deve essere in un thread separato.
+        
+        # --- MODIFICA CRUCIALE QUI: Disabilita la gestione dei segnali ---
+        # Questo impedisce l'errore "set_wakeup_fd only works in main thread"
+        if os.name != 'nt': # Questa opzione è rilevante solo per sistemi Unix-like (Linux, macOS)
+            # Rimuovi i signal handler predefiniti se presenti
+            # Questo è un workaround per evitare che asyncio cerchi di registrare handler di segnali
+            # nel thread non principale, il che causerebbe l'errore.
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    # Rimuove l'handler di segnale se esiste, senza errore se non c'è
+                    signal.signal(signum, signal.SIG_DFL) 
+                except ValueError:
+                    pass # Se non c'è un handler registrato, ignora
+            logger.info("Signal handlers disabilitati per il thread del bot.")
+        # --- FINE MODIFICA CRUCIALE ---
+
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     else:
         logger.error("Applicazione Telegram non inizializzata. Impossibile avviare il polling del bot.")
@@ -194,9 +192,6 @@ def run_bot_polling():
 def setup_scheduler(app_instance: Application):
     """Configura e avvia lo scheduler per gli aggiornamenti automatici periodici."""
     scheduler = BackgroundScheduler()
-    # Esegui ogni giorno alle 08:00 (ora di Roma).
-    # Assicurati che il fuso orario sia corretto per il tuo ambiente di hosting (Render.com è basato su UTC,
-    # ma specificando il fuso orario, APScheduler lo gestisce correttamente).
     scheduler.add_job(
         lambda: asyncio.run(send_bollettino_update_to_telegram(app_instance)),
         'cron',
@@ -204,14 +199,5 @@ def setup_scheduler(app_instance: Application):
         minute=0,
         timezone='Europe/Rome'
     )
-    # --- Per testing, puoi usare un intervallo più breve (disabilita quello sopra) ---
-    # scheduler.add_job(
-    #     lambda: asyncio.run(send_bollettino_update_to_telegram(app_instance)),
-    #     'interval',
-    #     minutes=5, # Esegui ogni 5 minuti per test
-    #     args=[app_instance]
-    # )
-    # --- Fine blocco testing ---
-
     scheduler.start()
     logger.info("Scheduler avviato per l'aggiornamento automatico (ogni giorno alle 08:00 ora di Roma).")
