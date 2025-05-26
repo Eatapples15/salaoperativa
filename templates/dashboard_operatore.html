@@ -1,0 +1,234 @@
+
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard Operatore Protezione Civile Basilicata</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 20px;
+            background-color: #f4f7f6;
+            color: #333;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 800px;
+            margin: 30px auto;
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            border-top: 5px solid #28a745; /* Colore Protezione Civile */
+        }
+        h1, h2 {
+            color: #28a745;
+            text-align: center;
+            margin-bottom: 25px;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px dashed #eee;
+        }
+        .section:last-child {
+            border-bottom: none;
+        }
+        .info-box {
+            background-color: #e9f5ee;
+            padding: 15px;
+            border-left: 5px solid #28a745;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .info-box p {
+            margin: 5px 0;
+        }
+        .info-box strong {
+            color: #1e7e34;
+        }
+        .button-group {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .button {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1.1em;
+            transition: background-color 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            margin: 0 10px;
+        }
+        .button:hover {
+            background-color: #0056b3;
+        }
+        .button.secondary {
+            background-color: #6c757d;
+        }
+        .button.secondary:hover {
+            background-color: #5a6268;
+        }
+        a {
+            color: #007bff;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .feedback-message {
+            font-weight: bold;
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .warning {
+            color: #856404;
+            background-color: #fff3cd;
+            border: 1px solid #ffeeba;
+        }
+        .success {
+            color: #155724;
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            color: #721c24;
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Dashboard Controllo Bot Protezione Civile Basilicata</h1>
+
+        <div class="section">
+            <h2>Riferimenti Bollettini</h2>
+            <p>Accedi direttamente alla pagina ufficiale dei bollettini e avvisi della Protezione Civile Regione Basilicata per consultare l'ultima versione:</p>
+            <div class="button-group">
+                <a href="https://centrofunzionale.regione.basilicata.it/it/bollettini-avvisi.php?lt=A" target="_blank" class="button secondary">Vai al Sito Ufficiale</a>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Stato Attuale</h2>
+            <div class="info-box">
+                <p>Data e Ora Attuale: <strong id="currentDateTime">Caricamento...</strong></p>
+                <p>Bot Telegram Attivo: <strong id="botRunningStatus">Verifica...</strong></p>
+                <p>Ultimo Avvio Manuale del Bot: <strong id="lastRunTimestamp">N.D.</strong></p>
+                <p>Ultimo Check Automatico: <strong id="lastAutomaticCheck">N.D.</strong></p>
+                <p>Feedback Operazione: <span id="feedbackMessage" class="feedback-message">In attesa di operazioni...</span></p>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Controllo Bot</h2>
+            <p>Usa il pulsante qui sotto per richiedere al bot di leggere e inviare un aggiornamento manuale del bollettino.</p>
+            <div class="button-group">
+                <button id="triggerBotButton" class="button">Avvia Controllo Bollettino Manuale</button>
+            </div>
+            <p style="text-align: center; margin-top: 15px; font-style: italic; color: #666;">
+                Nota: L'aggiornamento automatico del bot avviene ogni giorno alle 08:00 (ora di Roma). Questo pulsante forza un controllo immediato.
+            </p>
+        </div>
+
+    </div>
+
+    <script>
+        // Funzione per aggiornare data e ora
+        function updateDateTime() {
+            const now = new Date();
+            const options = {
+                weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+                hour12: false
+            };
+            document.getElementById('currentDateTime').textContent = now.toLocaleDateString('it-IT', options);
+        }
+        setInterval(updateDateTime, 1000);
+        updateDateTime(); // Chiamata iniziale
+
+        // Funzione per formattare i timestamp in un formato leggibile
+        function formatTimestamp(isoString) {
+            if (!isoString) return 'N.D.';
+            const date = new Date(isoString);
+            return date.toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        // Funzione per caricare lo stato del bot dal backend e aggiornare la UI
+        async function fetchBotStatus() {
+            try {
+                const response = await fetch('/api/get_bot_status');
+                const data = await response.json();
+
+                // Aggiorna lo stato di attività del bot
+                document.getElementById('botRunningStatus').textContent = data.botRunning ? 'SÌ' : 'NO';
+                document.getElementById('botRunningStatus').style.color = data.botRunning ? 'green' : 'red';
+
+                // Aggiorna i timestamp delle ultime esecuzioni
+                document.getElementById('lastRunTimestamp').textContent = formatTimestamp(data.lastManualRun);
+                document.getElementById('lastAutomaticCheck').textContent = formatTimestamp(data.lastAutomaticCheck);
+
+                // Aggiorna il messaggio di feedback e il suo stile
+                const feedbackMessageElement = document.getElementById('feedbackMessage');
+                feedbackMessageElement.textContent = data.lastOperationFeedback.message;
+                feedbackMessageElement.className = 'feedback-message'; // Reset classes
+
+                if (data.lastOperationFeedback.success === true) {
+                    feedbackMessageElement.classList.add('success');
+                } else if (data.lastOperationFeedback.success === false) {
+                    feedbackMessageElement.classList.add('error');
+                } else {
+                    feedbackMessageElement.classList.add('warning'); // In attesa / in corso
+                }
+
+            } catch (error) {
+                console.error('Errore nel caricamento dello stato del bot:', error);
+                document.getElementById('feedbackMessage').textContent = 'Errore di connessione al server. Controlla la console.';
+                document.getElementById('feedbackMessage').className = 'feedback-message error';
+            }
+        }
+
+        // Event listener per il pulsante di trigger manuale del bot
+        document.getElementById('triggerBotButton').addEventListener('click', async () => {
+            document.getElementById('feedbackMessage').textContent = 'Richiesta di controllo manuale inviata...';
+            document.getElementById('feedbackMessage').className = 'feedback-message warning';
+            document.getElementById('triggerBotButton').disabled = true; // Disabilita il pulsante durante l'operazione
+
+            try {
+                const response = await fetch('/api/trigger_manual_update', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    document.getElementById('feedbackMessage').textContent = data.message;
+                    document.getElementById('feedbackMessage').className = 'feedback-message success';
+                    // Il timestamp dell'ultima esecuzione manuale verrà aggiornato dalla fetchBotStatus periodica
+                } else {
+                    document.getElementById('feedbackMessage').textContent = 'ERRORE: ' + data.message;
+                    document.getElementById('feedbackMessage').className = 'feedback-message error';
+                }
+            } catch (error) {
+                console.error('Errore durante l\'invio del comando al bot:', error);
+                document.getElementById('feedbackMessage').textContent = 'Errore di connessione o del server. Controlla la console.';
+                document.getElementById('feedbackMessage').className = 'feedback-message error';
+            } finally {
+                document.getElementById('triggerBotButton').disabled = false; // Riabilita il pulsante
+                // Forza un aggiornamento dello stato dopo l'operazione manuale per vedere il feedback più velocemente
+                setTimeout(fetchBotStatus, 1000); 
+            }
+        });
+
+        // Al caricamento della pagina, carica lo stato iniziale e imposta un intervallo per aggiornamenti periodici
+        window.onload = () => {
+            fetchBotStatus(); // Carica subito lo stato iniziale
+            setInterval(fetchBotStatus, 5000); // Aggiorna lo stato ogni 5 secondi
+        };
+    </script>
+</body>
+</html>
