@@ -7,7 +7,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import datetime
 import os
 import asyncio
-import signal # Aggiungi questa importazione
+# Rimuovi l'import di 'signal' se non usato altrove, altrimenti lascialo.
+# Non è più necessario per la gestione dei segnali del polling.
 
 # --- Configurazione del Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -19,7 +20,7 @@ CANALE_PROTEZIONE_CIVILE_ID = os.getenv("CANALE_PROTEZIONE_CIVILE_ID")
 URL_BOLLETTINO = "https://centrofunzionale.regione.basilicata.it/it/bollettini-avvisi.php?lt=A"
 
 # --- Stato Globale (In Memoria) ---
-last_processed_bollettino_date = None # Dovrebbe essere un oggetto datetime.date
+last_processed_bollettino_date = None
 
 # --- Istanza dell'Applicazione Telegram ---
 application = None
@@ -28,10 +29,8 @@ def init_telegram_application():
     """Inizializza l'istanza dell'applicazione Telegram."""
     global application
     
-    # LOG DI DEBUG TEMPORANEO: Rimuovilo quando il bot funziona!
     logger.info(f"Tentativo di inizializzare l'applicazione. Token letto (prime 5 car): {TELEGRAM_BOT_TOKEN[:5] if TELEGRAM_BOT_TOKEN else 'None'}")
     logger.info(f"ID Canale letto: {CANALE_PROTEZIONE_CIVILE_ID if CANALE_PROTEZIONE_CIVILE_ID else 'None'}")
-    # FINE LOG DI DEBUG
 
     if not TELEGRAM_BOT_TOKEN:
         logger.error("ERRORE: TELEGRAM_BOT_TOKEN non impostato. Il bot non può avviarsi.")
@@ -42,7 +41,7 @@ def init_telegram_application():
             logger.info("Applicazione Telegram inizializzata con successo.")
         except Exception as e:
             logger.exception(f"ERRORE: Impossibile inizializzare l'applicazione Telegram: {e}")
-            application = None # Assicurati che sia None in caso di fallimento
+            application = None
     return application
 
 async def get_bollettino_info():
@@ -52,8 +51,8 @@ async def get_bollettino_info():
     """
     try:
         logger.info(f"Tentativo di scaricare il bollettino da: {URL_BOLLETTINO}")
-        response = requests.get(URL_BOLLETTINO, timeout=15) # Aumentato il timeout
-        response.raise_for_status() # Lancia un'eccezione per risposte HTTP con errori (4xx, 5xx)
+        response = requests.get(URL_BOLLETTINO, timeout=15)
+        response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -145,7 +144,7 @@ async def send_bollettino_update_to_telegram(app_instance: Application):
         logger.warning("Impossibile recuperare il link o la data del bollettino dal sito.")
         return {"success": False, "message": "Impossibile recuperare il bollettino dal sito. Controllare i log."}
 
-# --- Comandi del Bot Telegram ---
+# --- Comandi del Bot Telegram --- (Rimangono gli stessi)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Gestisce il comando /start inviato al bot su Telegram."""
@@ -162,32 +161,10 @@ async def aggiorna_manuale_command(update: Update, context: ContextTypes.DEFAULT
         result = await send_bollettino_update_to_telegram(context.application)
         await update.message.reply_text(f"Operazione completata: {result['message']}")
 
-def run_bot_polling():
-    """Avvia il polling del bot Telegram per ricevere i comandi degli utenti."""
-    global application
-    if application:
-        logger.info("Avvio del polling del bot Telegram...")
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("aggiorna", aggiorna_manuale_command))
-        
-        # --- MODIFICA CRUCIALE QUI: Disabilita la gestione dei segnali ---
-        # Questo impedisce l'errore "set_wakeup_fd only works in main thread"
-        if os.name != 'nt': # Questa opzione è rilevante solo per sistemi Unix-like (Linux, macOS)
-            # Rimuovi i signal handler predefiniti se presenti
-            # Questo è un workaround per evitare che asyncio cerchi di registrare handler di segnali
-            # nel thread non principale, il che causerebbe l'errore.
-            for signum in (signal.SIGINT, signal.SIGTERM):
-                try:
-                    # Rimuove l'handler di segnale se esiste, senza errore se non c'è
-                    signal.signal(signum, signal.SIG_DFL) 
-                except ValueError:
-                    pass # Se non c'è un handler registrato, ignora
-            logger.info("Signal handlers disabilitati per il thread del bot.")
-        # --- FINE MODIFICA CRUCIALE ---
-
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-    else:
-        logger.error("Applicazione Telegram non inizializzata. Impossibile avviare il polling del bot.")
+# RIMOSSO: run_bot_polling(). Non è più necessario con i webhooks.
+# Lascia solo l'aggiunta degli handler nel bot_core.py, ma non la funzione di run_polling.
+# Gli handler verranno aggiunti all'applicazione in init_telegram_application o simili.
+# In questo caso, li aggiungo nella init_telegram_application per semplicità.
 
 def setup_scheduler(app_instance: Application):
     """Configura e avvia lo scheduler per gli aggiornamenti automatici periodici."""
@@ -201,3 +178,27 @@ def setup_scheduler(app_instance: Application):
     )
     scheduler.start()
     logger.info("Scheduler avviato per l'aggiornamento automatico (ogni giorno alle 08:00 ora di Roma).")
+
+# Aggiungi gli handler dei comandi direttamente alla build dell'applicazione in init_telegram_application
+# (Alternativa per non dover avere una funzione run_bot_polling separata)
+def init_telegram_application():
+    """Inizializza l'istanza dell'applicazione Telegram e aggiunge gli handler."""
+    global application
+    
+    logger.info(f"Tentativo di inizializzare l'applicazione. Token letto (prime 5 car): {TELEGRAM_BOT_TOKEN[:5] if TELEGRAM_BOT_TOKEN else 'None'}")
+    logger.info(f"ID Canale letto: {CANALE_PROTEZIONE_CIVILE_ID if CANALE_PROTEZIONE_CIVILE_ID else 'None'}")
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("ERRORE: TELEGRAM_BOT_TOKEN non impostato. Il bot non può avviarsi.")
+        return None
+    if application is None:
+        try:
+            application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+            # Aggiungi gli handler qui, ora che l'applicazione è costruita
+            application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("aggiorna", aggiorna_manuale_command))
+            logger.info("Applicazione Telegram inizializzata con successo e handler aggiunti.")
+        except Exception as e:
+            logger.exception(f"ERRORE: Impossibile inizializzare l'applicazione Telegram: {e}")
+            application = None
+    return application
