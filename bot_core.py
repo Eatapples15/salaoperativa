@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 # --- Variabili d'Ambiente ---
 # Queste variabili verranno lette dalle Environment Variables che imposterai su Render.com.
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CANALE_PROTEZIONE_CIVILE_ID = os.getenv("CANALE_PROTEZIONE_CIVILE_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("7438234053:AAHdiIU-dDrT7put4p8GFveNkWV52uETHu4")
+CANALE_PROTEZIONE_CIVILE_ID = os.getenv("-4630402427")
 URL_BOLLETTINO = "https://centrofunzionale.regione.basilicata.it/it/bollettini-avvisi.php?lt=A"
 
 # --- Stato Globale (In Memoria) ---
