@@ -6,9 +6,9 @@ from flask import Flask, render_template, jsonify, request
 from bot_core import (
     start_scheduler,
     stop_scheduler,
-    check_and_send_bollettino, # Per l'aggiornamento manuale
-    initial_check, # Per il check all'avvio
-    get_bot_status # Per l'endpoint dello stato
+    check_and_send_bollettino,
+    initial_check,
+    get_bot_status
 )
 
 # --- Configurazione del Logging per app.py ---
@@ -36,18 +36,17 @@ def run_async_in_thread(coro):
 @app.route('/')
 def home():
     """Pagina Home per mostrare lo stato del bot."""
-    # Richiedi lo stato attuale del bot da bot_core
-    status = get_bot_status()
+    status = get_bot_status() # Ottiene lo stato dal bot_core
     return render_template('index.html', bot_status=status)
 
 @app.route('/api/trigger_manual_update', methods=['POST'])
 def trigger_manual_update():
     """Endpoint API per avviare un aggiornamento manuale del bollettino."""
     logger.info("Comando di aggiornamento manuale ricevuto e avviato nel thread.")
-    # Esegui check_and_send_bollettino in un thread separato per non bloccare Flask
     thread = threading.Thread(target=run_async_in_thread, args=(check_and_send_bollettino(),))
     thread.start()
-    return jsonify({"status": "Comando di aggiornamento manuale avviato. Controlla i log per lo stato."}), 200
+    # Restituisce una risposta immediata, il client JS dovrà fare un'altra GET per lo stato aggiornato
+    return jsonify({"status": "Comando di aggiornamento manuale avviato. Controlla i log per lo stato più dettagliato o ricarica la pagina per lo stato riepilogativo."}), 200
 
 @app.route('/api/get_bot_status', methods=['GET'])
 def api_get_bot_status():
@@ -71,5 +70,4 @@ if __name__ == '__main__':
 
     # Render imposterà la porta tramite la variabile d'ambiente PORT
     port = int(os.environ.get('PORT', 5000))
-    # Flask in modalità debug per sviluppo, in produzione si usa Gunicorn/WSGI
     app.run(host='0.0.0.0', port=port, debug=False) # Debug False per produzione
