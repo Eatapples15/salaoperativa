@@ -124,7 +124,7 @@
                 <p>Ultimo Bollettino Trovato: <strong id="lastBollettinoDate">N.D.</strong></p>
                 <p>Link Ultimo Bollettino: <a id="lastBollettinoLink" href="#" target="_blank">N.D.</a></p>
                 <p>Ultimo Controllo Riuscito: <strong id="lastSuccessfulCheckTime">N.D.</strong></p>
-                <p>Stato Generale del Bot: <span id="feedbackMessage">In attesa di operazioni...</span></p>
+                <p>Stato del Caricamento Persistente: <strong id="stateLoadTime">N.D.</strong></p> <p>Stato Generale del Bot: <span id="feedbackMessage">In attesa di operazioni...</span></p>
             </div>
         </div>
 
@@ -190,6 +190,7 @@
             const lastBollettinoDateElem = document.getElementById('lastBollettinoDate');
             const lastBollettinoLinkElem = document.getElementById('lastBollettinoLink');
             const lastSuccessfulCheckTimeElem = document.getElementById('lastSuccessfulCheckTime');
+            const stateLoadTimeElem = document.getElementById('stateLoadTime'); // Elemento per il tempo di caricamento stato
             const feedbackMessageElem = document.getElementById('feedbackMessage');
 
             try {
@@ -199,7 +200,7 @@
 
                 // Aggiorna data bollettino
                 if (status.last_bollettino_date && status.last_bollettino_date !== "N/A") {
-                    const date = new Date(status.last_bollettino_date);
+                    const date = new Date(status.last_bollettino_date); // La data è in formato YYYY-MM-DD
                     lastBollettinoDateElem.textContent = date.toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric' });
                 } else {
                     lastBollettinoDateElem.textContent = 'N.D.';
@@ -216,19 +217,29 @@
 
                 // Aggiorna ultimo controllo riuscito
                 if (status.last_successful_check_time && status.last_successful_check_time !== "N/A") {
-                    const checkDate = new Date(status.last_successful_check_time);
+                    const checkDate = new Date(status.last_successful_check_time); // La data è in formato ISO
                     lastSuccessfulCheckTimeElem.textContent = checkDate.toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
                 } else {
                     lastSuccessfulCheckTimeElem.textContent = 'N.D.';
                 }
 
+                // Aggiorna stato del caricamento persistente
+                if (status.state_load_time && status.state_load_time !== "N/A") {
+                    const loadDate = new Date(status.state_load_time);
+                    stateLoadTimeElem.textContent = loadDate.toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                } else {
+                    stateLoadTimeElem.textContent = 'N.D.';
+                }
+
+
                 // Aggiorna stato generale del bot
                 feedbackMessageElem.textContent = status.last_check_status;
-                if (status.last_check_status.includes("Errore") or status.last_check_status.includes("Impossibile recuperare")) {
+                // Correzione qui: da 'or' a '||'
+                if (status.last_check_status.includes("Errore") || status.last_check_status.includes("Impossibile recuperare")) {
                     feedbackMessageElem.className = 'error';
                 } else if (status.last_check_status.includes("successo")) {
                     feedbackMessageElem.className = 'success';
-                } else if (status.last_check_status.includes("In attesa") || status.last_check_status.includes("Già presente")) {
+                } else if (status.last_check_status.includes("In attesa") || status.last_check_status.includes("Già presente") || status.last_check_status.includes("Trovato")) {
                     feedbackMessageElem.className = 'warning'; // Giallo per stati informativi
                 } else {
                     feedbackMessageElem.className = ''; // Nessuna classe per default
@@ -239,6 +250,7 @@
                 lastBollettinoDateElem.textContent = 'Errore di caricamento';
                 lastBollettinoLinkElem.textContent = 'Errore di caricamento';
                 lastSuccessfulCheckTimeElem.textContent = 'Errore di caricamento';
+                stateLoadTimeElem.textContent = 'Errore di caricamento';
                 feedbackMessageElem.textContent = 'Errore di connessione con il backend dello stato.';
                 feedbackMessageElem.className = 'error';
             }
@@ -247,7 +259,6 @@
         window.onload = loadInitialState;
         // Aggiorna lo stato ogni 30 secondi (o più frequentemente se desiderato)
         setInterval(loadInitialState, 30000); 
-
     </script>
 </body>
 </html>
