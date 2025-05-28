@@ -55,14 +55,11 @@ def api_get_bot_status():
     status = get_bot_status()
     return jsonify(status), 200
 
-# --- Avvio del bot e dello scheduler ---
-@app.before_first_request
-def setup_bot():
-    """
-    Funzione eseguita una sola volta prima della prima richiesta per inizializzare il bot.
-    """
+# --- Punto di ingresso principale ---
+if __name__ == '__main__':
     logger.info("Eseguo setup iniziale del bot...")
-    # Avvia lo scheduler in un thread separato per non bloccare l'app Flask
+    
+    # Avvia lo scheduler in un thread separato
     scheduler_thread = threading.Thread(target=run_async_in_thread, args=(start_scheduler(),))
     scheduler_thread.start()
     
@@ -72,8 +69,6 @@ def setup_bot():
     
     logger.info("Setup bot completato.")
 
-# --- Punto di ingresso principale ---
-if __name__ == '__main__':
     # Render imposterà la porta tramite la variabile d'ambiente PORT
     port = int(os.environ.get('PORT', 5000))
     # Flask in modalità debug per sviluppo, in produzione si usa Gunicorn/WSGI
