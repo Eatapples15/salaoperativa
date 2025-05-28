@@ -1,3 +1,5 @@
+# BOT_CORE.PY
+
 import logging
 import requests
 from bs4 import BeautifulSoup
@@ -7,7 +9,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import datetime
 import os
 import asyncio
-# Non serve importare signal qui.
 
 # --- Configurazione del Logging ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -22,11 +23,17 @@ URL_BOLLETTINO = "https://centrofunzionale.regione.basilicata.it/it/bollettini-a
 last_processed_bollettino_date = None
 
 # --- Istanza dell'Applicazione Telegram ---
-application = None
+# Non definire 'application' qui come None, perché verrà importata e assegnata in app.py.
+# La variabile 'application' all'interno di bot_core è locale alla sua gestione.
+# init_telegram_application restituirà l'istanza.
+# Questa riga non è più necessaria: application = None
+
 
 def init_telegram_application():
     """Inizializza l'istanza dell'applicazione Telegram e aggiunge gli handler."""
-    global application
+    # Rimuovi 'global application' qui, dato che l'istanza viene restituita.
+    # Non hai bisogno di renderla globale *all'interno* di bot_core.py,
+    # la sua gestione è esterna.
     
     logger.info(f"Tentativo di inizializzare l'applicazione. Token letto (prime 5 car): {TELEGRAM_BOT_TOKEN[:5] if TELEGRAM_BOT_TOKEN else 'None'}")
     logger.info(f"ID Canale letto: {CANALE_PROTEZIONE_CIVILE_ID if CANALE_PROTEZIONE_CIVILE_ID else 'None'}")
@@ -34,17 +41,18 @@ def init_telegram_application():
     if not TELEGRAM_BOT_TOKEN:
         logger.error("ERRORE: TELEGRAM_BOT_TOKEN non impostato. Il bot non può avviarsi.")
         return None
-    if application is None:
-        try:
-            application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-            # Aggiungi gli handler qui, ora che l'applicazione è costruita
-            application.add_handler(CommandHandler("start", start_command))
-            application.add_handler(CommandHandler("aggiorna", aggiorna_manuale_command))
-            logger.info("Applicazione Telegram inizializzata con successo e handler aggiunti.")
-        except Exception as e:
-            logger.exception(f"ERRORE: Impossibile inizializzare l'applicazione Telegram: {e}")
-            application = None
-    return application
+    
+    # Crea sempre una nuova istanza qui per essere sicuri
+    try:
+        app_instance = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        app_instance.add_handler(CommandHandler("start", start_command))
+        app_instance.add_handler(CommandHandler("aggiorna", aggiorna_manuale_command))
+        logger.info("Applicazione Telegram inizializzata con successo e handler aggiunti.")
+        return app_instance
+    except Exception as e:
+        logger.exception(f"ERRORE: Impossibile inizializzare l'applicazione Telegram: {e}")
+        return None
+
 
 async def get_bollettino_info():
     """
@@ -158,15 +166,18 @@ async def aggiorna_manuale_command(update: Update, context: ContextTypes.DEFAULT
     """Gestisce il comando /aggiorna per attivare un controllo manuale dal Telegram."""
     if update.message:
         await update.message.reply_text("Richiesta di aggiornamento manuale avviata. Controllo il bollettino...")
+        # Quando chiamato da Telegram, il risultato viene gestito qui, non dalla dashboard
         result = await send_bollettino_update_to_telegram(context.application)
         await update.message.reply_text(f"Operazione completata: {result['message']}")
 
-def setup_scheduler(app_instance: Application):
+# Modifica setup_scheduler per accettare il callback per la dashboard
+def setup_scheduler(app_instance: Application, dashboard_callback):
     """Configura e avvia lo scheduler per gli aggiornamenti automatici periodici."""
     scheduler = BackgroundScheduler()
     # Lo scheduler ora chiamerà _run_async_in_thread di app.py
+    # Passa il callback anche qui per l'aggiornamento automatico dello stato
     scheduler.add_job(
-        lambda: _run_async_in_thread(send_bollettino_update_to_telegram(app_instance)),
+        lambda: _run_async_in_thread(send_bollettino_update_to_telegram(app_instance), dashboard_callback),
         'cron',
         hour=8,
         minute=0,
