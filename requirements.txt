@@ -1,4 +1,4 @@
 requests
 beautifulsoup4
-python-telegram-bot==20.x # o la versione esatta che stai usando
+python-telegram-bot==22.1
 APScheduler
