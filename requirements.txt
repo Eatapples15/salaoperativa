@@ -3,3 +3,6 @@ beautifulsoup4
 python-telegram-bot==22.1
 APScheduler
 Flask
+pytz
+# Se useremo una persistenza più complessa, potremmo aggiungere:
+# simplejson (per una gestione JSON più robusta se necessario, ma il modulo json standard Python va bene per questo caso)
