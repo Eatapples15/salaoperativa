@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="it">
 <head>
@@ -81,26 +80,28 @@
         a:hover {
             text-decoration: underline;
         }
-        .feedback-message {
+        .feedback-box {
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 8px;
+            background-color: #f9f9f9;
+        }
+        #feedbackMessage {
             font-weight: bold;
             margin-top: 10px;
-            padding: 10px;
-            border-radius: 5px;
         }
-        .warning {
-            color: #856404;
-            background-color: #fff3cd;
-            border: 1px solid #ffeeba;
+        #feedbackMessage.success {
+            color: #28a745;
         }
-        .success {
-            color: #155724;
-            background-color: #d4edda;
-            border: 1px solid #c3e6cb;
+        #feedbackMessage.warning {
+            color: #ffc107;
         }
-        .error {
-            color: #721c24;
-            background-color: #f8d7da;
-            border: 1px solid #f5c6cb;
+        #feedbackMessage.error {
+            color: #dc3545;
+        }
+        #lastRunTimestamp, #lastAutomaticCheck {
+            font-weight: bold;
+            color: #0056b3;
         }
     </style>
 </head>
@@ -120,10 +121,10 @@
             <h2>Stato Attuale</h2>
             <div class="info-box">
                 <p>Data e Ora Attuale: <strong id="currentDateTime">Caricamento...</strong></p>
-                <p>Bot Telegram Attivo: <strong id="botRunningStatus">Verifica...</strong></p>
-                <p>Ultimo Avvio Manuale del Bot: <strong id="lastRunTimestamp">N.D.</strong></p>
-                <p>Ultimo Check Automatico: <strong id="lastAutomaticCheck">N.D.</strong></p>
-                <p>Feedback Operazione: <span id="feedbackMessage" class="feedback-message">In attesa di operazioni...</span></p>
+                <p>Ultimo Bollettino Trovato: <strong id="lastBollettinoDate">N.D.</strong></p>
+                <p>Link Ultimo Bollettino: <a id="lastBollettinoLink" href="#" target="_blank">N.D.</a></p>
+                <p>Ultimo Controllo Riuscito: <strong id="lastSuccessfulCheckTime">N.D.</strong></p>
+                <p>Stato Generale del Bot: <span id="feedbackMessage">In attesa di operazioni...</span></p>
             </div>
         </div>
 
@@ -134,14 +135,13 @@
                 <button id="triggerBotButton" class="button">Avvia Controllo Bollettino Manuale</button>
             </div>
             <p style="text-align: center; margin-top: 15px; font-style: italic; color: #666;">
-                Nota: L'aggiornamento automatico del bot avviene ogni giorno alle 08:00 (ora di Roma). Questo pulsante forza un controllo immediato.
+                Nota: Il controllo automatico del bollettino avviene ogni 15 minuti. Questo pulsante forza un controllo immediato.
             </p>
         </div>
 
     </div>
 
     <script>
-        // Funzione per aggiornare data e ora
         function updateDateTime() {
             const now = new Date();
             const options = {
@@ -151,84 +151,103 @@
             };
             document.getElementById('currentDateTime').textContent = now.toLocaleDateString('it-IT', options);
         }
+
         setInterval(updateDateTime, 1000);
-        updateDateTime(); // Chiamata iniziale
+        updateDateTime();
 
-        // Funzione per formattare i timestamp in un formato leggibile
-        function formatTimestamp(isoString) {
-            if (!isoString) return 'N.D.';
-            const date = new Date(isoString);
-            return date.toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        }
-
-        // Funzione per caricare lo stato del bot dal backend e aggiornare la UI
-        async function fetchBotStatus() {
-            try {
-                const response = await fetch('/api/get_bot_status');
-                const data = await response.json();
-
-                // Aggiorna lo stato di attività del bot
-                document.getElementById('botRunningStatus').textContent = data.botRunning ? 'SÌ' : 'NO';
-                document.getElementById('botRunningStatus').style.color = data.botRunning ? 'green' : 'red';
-
-                // Aggiorna i timestamp delle ultime esecuzioni
-                document.getElementById('lastRunTimestamp').textContent = formatTimestamp(data.lastManualRun);
-                document.getElementById('lastAutomaticCheck').textContent = formatTimestamp(data.lastAutomaticCheck);
-
-                // Aggiorna il messaggio di feedback e il suo stile
-                const feedbackMessageElement = document.getElementById('feedbackMessage');
-                feedbackMessageElement.textContent = data.lastOperationFeedback.message;
-                feedbackMessageElement.className = 'feedback-message'; // Reset classes
-
-                if (data.lastOperationFeedback.success === true) {
-                    feedbackMessageElement.classList.add('success');
-                } else if (data.lastOperationFeedback.success === false) {
-                    feedbackMessageElement.classList.add('error');
-                } else {
-                    feedbackMessageElement.classList.add('warning'); // In attesa / in corso
-                }
-
-            } catch (error) {
-                console.error('Errore nel caricamento dello stato del bot:', error);
-                document.getElementById('feedbackMessage').textContent = 'Errore di connessione al server. Controlla la console.';
-                document.getElementById('feedbackMessage').className = 'feedback-message error';
-            }
-        }
-
-        // Event listener per il pulsante di trigger manuale del bot
         document.getElementById('triggerBotButton').addEventListener('click', async () => {
-            document.getElementById('feedbackMessage').textContent = 'Richiesta di controllo manuale inviata...';
-            document.getElementById('feedbackMessage').className = 'feedback-message warning';
-            document.getElementById('triggerBotButton').disabled = true; // Disabilita il pulsante durante l'operazione
+            const feedbackMessage = document.getElementById('feedbackMessage');
+            feedbackMessage.textContent = 'Richiesta di aggiornamento manuale inviata...';
+            feedbackMessage.className = 'warning';
 
             try {
-                const response = await fetch('/api/trigger_manual_update', { method: 'POST' });
+                const response = await fetch('/api/trigger_manual_update', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
                 const data = await response.json();
 
-                if (data.success) {
-                    document.getElementById('feedbackMessage').textContent = data.message;
-                    document.getElementById('feedbackMessage').className = 'feedback-message success';
-                    // Il timestamp dell'ultima esecuzione manuale verrà aggiornato dalla fetchBotStatus periodica
+                if (response.ok) {
+                    feedbackMessage.textContent = data.status + ' Ricarico stato...';
+                    feedbackMessage.className = 'success';
+                    // Dopo il trigger, ricarica lo stato per vedere gli aggiornamenti
+                    setTimeout(loadInitialState, 2000); // Dai un po' di tempo al bot per elaborare
                 } else {
-                    document.getElementById('feedbackMessage').textContent = 'ERRORE: ' + data.message;
-                    document.getElementById('feedbackMessage').className = 'feedback-message error';
+                    feedbackMessage.textContent = 'ERRORE: ' + data.status + ' Controlla i log del bot.';
+                    feedbackMessage.className = 'error';
                 }
+
             } catch (error) {
-                console.error('Errore durante l\'invio del comando al bot:', error);
-                document.getElementById('feedbackMessage').textContent = 'Errore di connessione o del server. Controlla la console.';
-                document.getElementById('feedbackMessage').className = 'feedback-message error';
-            } finally {
-                document.getElementById('triggerBotButton').disabled = false; // Riabilita il pulsante
-                // Forza un aggiornamento dello stato dopo l'operazione manuale per vedere il feedback più velocemente
-                setTimeout(fetchBotStatus, 1000); 
+                console.error('Errore durante la comunicazione con il bot per l\'aggiornamento:', error);
+                feedbackMessage.textContent = 'Errore di connessione o del server. Controlla la console del browser.';
+                feedbackMessage.className = 'error';
             }
         });
 
-        // Al caricamento della pagina, carica lo stato iniziale e imposta un intervallo per aggiornamenti periodici
-        window.onload = () => {
-            fetchBotStatus(); // Carica subito lo stato iniziale
-            setInterval(fetchBotStatus, 5000); // Aggiorna lo stato ogni 5 secondi
-        };
+        async function loadInitialState() {
+            const lastBollettinoDateElem = document.getElementById('lastBollettinoDate');
+            const lastBollettinoLinkElem = document.getElementById('lastBollettinoLink');
+            const lastSuccessfulCheckTimeElem = document.getElementById('lastSuccessfulCheckTime');
+            const feedbackMessageElem = document.getElementById('feedbackMessage');
+
+            try {
+                const response = await fetch('/api/get_bot_status');
+                const status = await response.json();
+                console.log("Stato del bot dal backend:", status); // Per debugging
+
+                // Aggiorna data bollettino
+                if (status.last_bollettino_date && status.last_bollettino_date !== "N/A") {
+                    const date = new Date(status.last_bollettino_date);
+                    lastBollettinoDateElem.textContent = date.toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric' });
+                } else {
+                    lastBollettinoDateElem.textContent = 'N.D.';
+                }
+
+                // Aggiorna link bollettino
+                if (status.last_bollettino_link && status.last_bollettino_link !== "N/A") {
+                    lastBollettinoLinkElem.href = status.last_bollettino_link;
+                    lastBollettinoLinkElem.textContent = "Apri Bollettino";
+                } else {
+                    lastBollettinoLinkElem.href = "#";
+                    lastBollettinoLinkElem.textContent = "N.D.";
+                }
+
+                // Aggiorna ultimo controllo riuscito
+                if (status.last_successful_check_time && status.last_successful_check_time !== "N/A") {
+                    const checkDate = new Date(status.last_successful_check_time);
+                    lastSuccessfulCheckTimeElem.textContent = checkDate.toLocaleDateString('it-IT', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                } else {
+                    lastSuccessfulCheckTimeElem.textContent = 'N.D.';
+                }
+
+                // Aggiorna stato generale del bot
+                feedbackMessageElem.textContent = status.last_check_status;
+                if (status.last_check_status.includes("Errore") or status.last_check_status.includes("Impossibile recuperare")) {
+                    feedbackMessageElem.className = 'error';
+                } else if (status.last_check_status.includes("successo")) {
+                    feedbackMessageElem.className = 'success';
+                } else if (status.last_check_status.includes("In attesa") || status.last_check_status.includes("Già presente")) {
+                    feedbackMessageElem.className = 'warning'; // Giallo per stati informativi
+                } else {
+                    feedbackMessageElem.className = ''; // Nessuna classe per default
+                }
+
+            } catch (error) {
+                console.error('Errore nel caricamento dello stato iniziale:', error);
+                lastBollettinoDateElem.textContent = 'Errore di caricamento';
+                lastBollettinoLinkElem.textContent = 'Errore di caricamento';
+                lastSuccessfulCheckTimeElem.textContent = 'Errore di caricamento';
+                feedbackMessageElem.textContent = 'Errore di connessione con il backend dello stato.';
+                feedbackMessageElem.className = 'error';
+            }
+        }
+
+        window.onload = loadInitialState;
+        // Aggiorna lo stato ogni 30 secondi (o più frequentemente se desiderato)
+        setInterval(loadInitialState, 30000); 
+
     </script>
 </body>
 </html>
