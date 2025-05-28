@@ -1,6 +1,6 @@
-Flask
-python-telegram-bot==20.8 # O python-telegram-bot==21.11.1 (o l'ultima stabile che trovi su PyPI)
 requests
 beautifulsoup4
-lxml
+python-telegram-bot==20.x # o la versione esatta che stai usando
 APScheduler
+selenium
+webdriver-manager # Utile per lo sviluppo locale, Render userà un driver preinstallato
