@@ -8,7 +8,8 @@ from bot_core import (
     stop_scheduler,
     check_and_send_bollettino,
     initial_check,
-    get_bot_status
+    get_bot_status,
+    load_state_from_file # Aggiunto per caricare lo stato persistente
 )
 
 # --- Configurazione del Logging per app.py ---
@@ -36,16 +37,17 @@ def run_async_in_thread(coro):
 @app.route('/')
 def home():
     """Pagina Home per mostrare lo stato del bot."""
-    status = get_bot_status() # Ottiene lo stato dal bot_core
+    # Ottiene lo stato dal bot_core, che ora include anche informazioni sulla persistenza
+    status = get_bot_status()
     return render_template('index.html', bot_status=status)
 
 @app.route('/api/trigger_manual_update', methods=['POST'])
 def trigger_manual_update():
     """Endpoint API per avviare un aggiornamento manuale del bollettino."""
     logger.info("Comando di aggiornamento manuale ricevuto e avviato nel thread.")
+    # Esegue check_and_send_bollettino che ora salverà lo stato
     thread = threading.Thread(target=run_async_in_thread, args=(check_and_send_bollettino(),))
     thread.start()
-    # Restituisce una risposta immediata, il client JS dovrà fare un'altra GET per lo stato aggiornato
     return jsonify({"status": "Comando di aggiornamento manuale avviato. Controlla i log per lo stato più dettagliato o ricarica la pagina per lo stato riepilogativo."}), 200
 
 @app.route('/api/get_bot_status', methods=['GET'])
@@ -57,12 +59,18 @@ def api_get_bot_status():
 # --- Punto di ingresso principale ---
 if __name__ == '__main__':
     logger.info("Eseguo setup iniziale del bot...")
-    
+
+    # Carica lo stato precedente dal file all'avvio
+    initial_load_thread = threading.Thread(target=run_async_in_thread, args=(load_state_from_file(),))
+    initial_load_thread.start()
+    initial_load_thread.join() # Aspetta che il caricamento sia completo prima di proseguire
+
     # Avvia lo scheduler in un thread separato
     scheduler_thread = threading.Thread(target=run_async_in_thread, args=(start_scheduler(),))
     scheduler_thread.start()
     
     # Esegui il check iniziale subito per popolare lo stato
+    # Questo check ora userà lo stato caricato dal file
     initial_check_thread = threading.Thread(target=run_async_in_thread, args=(initial_check(),))
     initial_check_thread.start()
     
