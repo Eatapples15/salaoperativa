@@ -2,3 +2,4 @@ requests
 beautifulsoup4
 python-telegram-bot==22.1
 APScheduler
+Flask
