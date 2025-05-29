@@ -8,8 +8,8 @@ import re
 from telegram import Bot
 from telegram.constants import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import pytz # Aggiunto per la gestione dei fusi orari
-import json # Aggiunto per la persistenza JSON
+import pytz
+import json
 
 # --- Configurazione del Logging ---
 logging.basicConfig(
@@ -21,78 +21,75 @@ logger = logging.getLogger(__name__)
 # --- Variabili d'Ambiente ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CANALE_PROTEZIONE_CIVILE_ID = os.getenv("CANALE_PROTEZIONE_CIVILE_ID")
-STATE_FILE = "bot_state.json" # File per salvare lo stato del bot
+STATE_FILE = "bot_state.json"
 
-# --- Variabili Globali per il Bot ---
-last_bollettino_link = None
-last_bollettino_date = None # Questo sarà un oggetto date
-last_successful_check_time = None # Questo sarà un oggetto datetime con timezone
-last_check_status = "In attesa del primo controllo."
-state_load_time = None # Tempo dell'ultimo caricamento dello stato dal file
+# --- Variabili Globali per il Bot (gestite centralmente nell'event loop) ---
+# Saranno aggiornate e lette solo all'interno dell'event loop principale del bot.
+# Useremo una cache per permettere a Flask di leggerle in modo thread-safe.
+_last_bollettino_link = None
+_last_bollettino_date = None
+_last_successful_check_time = None
+_last_check_status = "In attesa del primo controllo."
+_state_load_time = None
 
 # --- Costanti per lo Scraping ---
 URL_BOLLETTINO = "https://centrofunzionale.regione.basilicata.it/it/bollettini-avvisi.php?lt=A"
 BASE_URL_SITO = "https://centrofunzionale.regione.basilicata.it"
 
-# --- Inizializzazione Bot Telegram ---
-bot = None
-if TELEGRAM_BOT_TOKEN:
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-else:
-    logger.error("TELEGRAM_BOT_TOKEN non è configurato. Il bot non potrà inviare messaggi.")
+# --- Inizializzazione Bot Telegram e Scheduler (gestiti internamente al thread del bot) ---
+_bot = None
+_scheduler = None
+_bot_loop = None # L'event loop principale del bot
 
 # --- Configurazione Fuso Orario ---
-# Utilizza il fuso orario di Roma per coerenza con l'ora italiana
 ROME_TZ = pytz.timezone('Europe/Rome')
 
 
-# --- Funzioni di Persistenza dello Stato ---
-async def load_state_from_file():
-    global last_bollettino_link, last_bollettino_date, last_successful_check_time, last_check_status, state_load_time
+# --- Funzioni di Persistenza dello Stato (async) ---
+async def _load_state_from_file_async():
+    """Carica lo stato del bot da file. Deve essere eseguita nell'event loop del bot."""
+    global _last_bollettino_link, _last_bollettino_date, _last_successful_check_time, _last_check_status, _state_load_time
     try:
         if os.path.exists(STATE_FILE):
             with open(STATE_FILE, 'r') as f:
                 state = json.load(f)
             
-            # Carica i dati e converti stringhe in oggetti datetime/date
-            last_bollettino_link = state.get('last_bollettino_link')
+            _last_bollettino_link = state.get('last_bollettino_link')
             
-            # Converte la stringa ISO della data in oggetto date
             date_str = state.get('last_bollettino_date')
-            last_bollettino_date = datetime.fromisoformat(date_str).date() if date_str else None
+            _last_bollettino_date = datetime.fromisoformat(date_str).date() if date_str else None
 
-            # Converte la stringa ISO del datetime in oggetto datetime (timezone-aware)
             time_str = state.get('last_successful_check_time')
             if time_str:
-                last_successful_check_time = datetime.fromisoformat(time_str)
-                # Assicurati che sia timezone-aware se non lo è già (dal salvataggio)
-                if last_successful_check_time.tzinfo is None:
-                    last_successful_check_time = ROME_TZ.localize(last_successful_check_time)
+                _last_successful_check_time = datetime.fromisoformat(time_str)
+                if _last_successful_check_time.tzinfo is None:
+                    _last_successful_check_time = ROME_TZ.localize(_last_successful_check_time)
             else:
-                last_successful_check_time = None
+                _last_successful_check_time = None
             
-            last_check_status = state.get('last_check_status', "Stato caricato dal file.")
-            state_load_time = datetime.now(ROME_TZ) # Tempo di caricamento del file
+            _last_check_status = state.get('last_check_status', "Stato caricato dal file.")
+            _state_load_time = datetime.now(ROME_TZ)
 
             logger.info(f"Stato del bot caricato da {STATE_FILE}.")
-            logger.info(f"Ultimo bollettino caricato: {last_bollettino_date} ({last_bollettino_link})")
-            logger.info(f"Ultimo check riuscito caricato: {last_successful_check_time}")
+            logger.info(f"Ultimo bollettino caricato: {_last_bollettino_date} ({_last_bollettino_link})")
+            logger.info(f"Ultimo check riuscito caricato: {_last_successful_check_time}")
         else:
             logger.info(f"File di stato '{STATE_FILE}' non trovato. Avvio con stato vuoto.")
-            state_load_time = datetime.now(ROME_TZ)
+            _state_load_time = datetime.now(ROME_TZ)
     except Exception as e:
         logger.error(f"Errore durante il caricamento dello stato dal file {STATE_FILE}: {e}")
-        last_check_status = "Errore durante il caricamento dello stato dal file."
-        state_load_time = datetime.now(ROME_TZ) # Registra comunque il tentativo di caricamento
+        _last_check_status = "Errore durante il caricamento dello stato dal file."
+        _state_load_time = datetime.now(ROME_TZ)
 
-async def save_state_to_file():
-    global last_bollettino_link, last_bollettino_date, last_successful_check_time, last_check_status
+async def _save_state_to_file_async():
+    """Salva lo stato del bot su file. Deve essere eseguita nell'event loop del bot."""
+    global _last_bollettino_link, _last_bollettino_date, _last_successful_check_time, _last_check_status
     try:
         state = {
-            'last_bollettino_link': last_bollettino_link,
-            'last_bollettino_date': last_bollettino_date.isoformat() if last_bollettino_date else None,
-            'last_successful_check_time': last_successful_check_time.isoformat() if last_successful_check_time else None,
-            'last_check_status': last_check_status
+            'last_bollettino_link': _last_bollettino_link,
+            'last_bollettino_date': _last_bollettino_date.isoformat() if _last_bollettino_date else None,
+            'last_successful_check_time': _last_successful_check_time.isoformat() if _last_successful_check_time else None,
+            'last_check_status': _last_check_status
         }
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f, indent=4)
@@ -101,7 +98,10 @@ async def save_state_to_file():
         logger.error(f"Errore durante il salvataggio dello stato nel file {STATE_FILE}: {e}")
 
 
-# --- Funzione di Scraping Corretta ---
+# --- Funzione di Scraping Corretta (async - nota: requests è sincrono, quindi non è awaitable di per sé) ---
+# La lasciamo così, ma la chiamata dovrà essere fatta in un esecutore di thread se vogliamo che non blocchi il loop.
+# Tuttavia, per lo scraping singolo, spesso la si lascia sincrona e si affida al contesto di chiamata.
+# Dato che è piccola, la manteniamo così.
 async def get_bollettino_info():
     """
     Funzione per scaricare e parsare le informazioni del bollettino dalla pagina
@@ -112,8 +112,9 @@ async def get_bollettino_info():
 
     try:
         logger.info(f"Tentativo di scaricare il bollettino da: {URL_BOLLETTINO}")
-        response = requests.get(URL_BOLLETTINO, timeout=15)
-        response.raise_for_status() # Lancia un'eccezione per status code HTTP di errore
+        # Esegui la richiesta sincrona in un thread pool per non bloccare l'event loop
+        response = await asyncio.to_thread(requests.get, URL_BOLLETTINO, timeout=15)
+        response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -131,8 +132,8 @@ async def get_bollettino_info():
                 
                 date_text_from_entry = link_element.get_text(strip=True)
                 
-                logger.debug(f"Link trovato nell'entry: {current_link_from_entry}")
-                logger.debug(f"Testo del link (con data) trovato: '{date_text_from_entry}'")
+                # logger.debug(f"Link trovato nell'entry: {current_link_from_entry}") # Troppo verboso per INFO
+                # logger.debug(f"Testo del link (con data) trovato: '{date_text_from_entry}'") # Troppo verboso per INFO
 
                 match = re.search(r'del\s+(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})', date_text_from_entry, re.IGNORECASE)
                 
@@ -154,7 +155,7 @@ async def get_bollettino_info():
                         try:
                             current_bollettino_date = datetime.strptime(date_str_formatted, "%d/%m/%Y").date()
                             logger.info(f"Data parsata con successo: {current_bollettino_date}")
-                            current_bollettino_link = current_link_from_entry # Assegna il link trovato
+                            current_bollettino_link = current_link_from_entry
                             break # Il primo che troviamo è il più recente dato l'ordine HTML.
                         except ValueError as ve:
                             logger.warning(f"Formato data '{date_str_formatted}' non valido. Errore: {ve}. Impossibile parsare la data.")
@@ -186,34 +187,28 @@ async def get_bollettino_info():
 async def check_and_send_bollettino():
     """
     Controlla se c'è un nuovo bollettino (il più recente) e lo invia al canale Telegram.
+    Questa funzione viene eseguita all'interno dell'event loop principale del bot.
     """
-    global last_bollettino_link, last_bollettino_date, last_successful_check_time, last_check_status
+    global _last_bollettino_link, _last_bollettino_date, _last_successful_check_time, _last_check_status, _bot
 
     logger.info("Avvio controllo aggiornamento bollettino per invio Telegram...")
 
-    link, new_date = await get_bollettino_info()
+    link, new_date = await get_bollettino_info() # get_bollettino_info è ora async
 
-    # Tempo attuale per aggiornare lo stato del check
     current_check_time = datetime.now(ROME_TZ)
 
     if link and new_date:
-        # Condizione per l'invio:
-        # 1. Se è il primo controllo in assoluto (last_bollettino_date è None)
-        # 2. Se la data del nuovo bollettino è *più recente* della data dell'ultimo bollettino registrato
-        # 3. Se la data è la stessa, ma il link è diverso (potrebbe essere una revisione del bollettino dello stesso giorno)
-        if last_bollettino_date is None or \
-           new_date > last_bollettino_date or \
-           (new_date == last_bollettino_date and link != last_bollettino_link):
+        if _last_bollettino_date is None or \
+           new_date > _last_bollettino_date or \
+           (new_date == _last_bollettino_date and link != _last_bollettino_link):
             try:
-                # Controlla che il bot sia stato inizializzato
-                if not bot:
-                    raise ValueError("Bot Telegram non inizializzato (TELEGRAM_BOT_TOKEN mancante).")
+                if not _bot:
+                    raise ValueError("Bot Telegram non inizializzato (_bot è None).")
                 if not CANALE_PROTEZIONE_CIVILE_ID:
                     raise ValueError("ID canale Telegram non configurato (CANALE_PROTEZIONE_CIVILE_ID mancante).")
 
                 data_formattata = new_date.strftime("%d/%m/%Y")
                 
-                # Messaggio standard per il bollettino più recente
                 message = (
                     f"🔔 *Nuovo Bollettino di Criticità Regionale disponibile!* 🔔\n\n"
                     f"🗓 Data: `{data_formattata}`\n"
@@ -221,7 +216,7 @@ async def check_and_send_bollettino():
                     f"Rimani aggiornato sulla situazione."
                 )
                 
-                await bot.send_message(
+                await _bot.send_message(
                     chat_id=CANALE_PROTEZIONE_CIVILE_ID,
                     text=message,
                     parse_mode=ParseMode.MARKDOWN,
@@ -229,61 +224,111 @@ async def check_and_send_bollettino():
                 )
                 logger.info(f"Bollettino del {data_formattata} (link: {link}) inviato con successo a Telegram.")
                 
-                last_bollettino_link = link
-                last_bollettino_date = new_date
-                last_successful_check_time = current_check_time
-                last_check_status = f"Ultimo bollettino: {data_formattata} ({link}). Stato: Inviato (più recente)."
+                _last_bollettino_link = link
+                _last_bollettino_date = new_date
+                _last_successful_check_time = current_check_time
+                _last_check_status = f"Ultimo bollettino: {data_formattata} ({link}). Stato: Inviato (più recente)."
                 
-                await save_state_to_file() # Salva lo stato dopo l'invio
+                await _save_state_to_file_async()
                 
             except ValueError as ve:
                 logger.error(f"Errore di configurazione Telegram: {ve}")
-                last_check_status = f"Errore configurazione Telegram: {ve}"
-                last_successful_check_time = current_check_time
+                _last_check_status = f"Errore configurazione Telegram: {ve}"
+                _last_successful_check_time = current_check_time
             except Exception as e:
                 logger.exception(f"Errore durante l'invio del messaggio Telegram: {e}")
-                last_check_status = f"Errore invio Telegram: {e}"
-                last_successful_check_time = current_check_time
+                _last_check_status = f"Errore invio Telegram: {e}"
+                _last_successful_check_time = current_check_time
 
-        else: # Nessun nuovo bollettino (stesso o più vecchio)
+        else:
             logger.info(f"Bollettino del {new_date.strftime('%d/%m/%Y')} (link: {link}) già presente o più vecchio. Nessun nuovo invio.")
-            last_successful_check_time = current_check_time
-            last_check_status = f"Ultimo bollettino: {new_date.strftime('%d/%m/%Y')} ({link}). Stato: Già presente."
+            _last_successful_check_time = current_check_time
+            _last_check_status = f"Ultimo bollettino: {new_date.strftime('%d/%m/%Y')} ({link}). Stato: Già presente."
 
     else:
         logger.warning("Impossibile recuperare il link o la data del bollettino dal sito.")
-        last_check_status = "Impossibile recuperare il bollettino dal sito. Controllare i log."
-        last_successful_check_time = current_check_time # Aggiorna l'orario anche se fallisce
+        _last_check_status = "Impossibile recuperare il bollettino dal sito. Controllare i log."
+        _last_successful_check_time = current_check_time
 
-# --- Funzione per ottenere lo stato del bot (per l'API Flask) ---
+# --- Funzione per ottenere lo stato del bot (thread-safe) ---
+# Questa funzione non è async e legge semplicemente le variabili globali.
 def get_bot_status():
-    """Restituisce lo stato corrente del bot."""
+    """Restituisce lo stato corrente del bot per l'API Flask."""
     return {
-        "last_bollettino_link": last_bollettino_link,
-        "last_bollettino_date": str(last_bollettino_date) if last_bollettino_date else "N/A",
-        # Converti il datetime timezone-aware in stringa ISO per una corretta trasmissione e parsing JS
-        "last_successful_check_time": last_successful_check_time.isoformat() if last_successful_check_time else "N/A",
-        "last_check_status": last_check_status,
-        "state_load_time": state_load_time.isoformat() if state_load_time else "N/A"
+        "last_bollettino_link": _last_bollettino_link,
+        "last_bollettino_date": str(_last_bollettino_date) if _last_bollettino_date else "N/A",
+        "last_successful_check_time": _last_successful_check_time.isoformat() if _last_successful_check_time else "N/A",
+        "last_check_status": _last_check_status,
+        "state_load_time": _state_load_time.isoformat() if _state_load_time else "N/A"
     }
 
-# --- Scheduler per i controlli automatici ---
-scheduler = AsyncIOScheduler(timezone=ROME_TZ) # Imposta il fuso orario per lo scheduler
+# --- Funzioni di gestione dell'event loop e scheduler (esposte per app.py) ---
+async def _bot_main_loop():
+    """
+    Funzione principale che esegue l'event loop del bot.
+    Inizializza il bot, lo scheduler e gestisce i task.
+    """
+    global _bot, _scheduler, _bot_loop
 
-async def start_scheduler():
-    """Avvia lo scheduler e aggiunge il job."""
-    # Esegui il check ogni 15 minuti.
-    scheduler.add_job(check_and_send_bollettino, 'interval', minutes=15)
-    scheduler.start()
+    _bot_loop = asyncio.get_running_loop() # Ottieni il loop corrente
+
+    if TELEGRAM_BOT_TOKEN:
+        _bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        logger.info("Bot Telegram inizializzato.")
+    else:
+        logger.error("TELEGRAM_BOT_TOKEN non è configurato. Il bot non potrà inviare messaggi.")
+        # Non uscire, ma disabilita le funzionalità di invio
+        _bot = None
+
+    _scheduler = AsyncIOScheduler(timezone=ROME_TZ)
+    _scheduler.add_job(check_and_send_bollettino, 'interval', minutes=15)
+    _scheduler.start()
     logger.info("Scheduler avviato. Controllo bollettino ogni 15 minuti.")
 
-async def stop_scheduler():
-    """Arresta lo scheduler."""
-    if scheduler.running:
-        scheduler.shutdown()
-        logger.info("Scheduler arrestato.")
-
-# --- Esecuzione iniziale del check all'avvio ---
-async def initial_check():
-    logger.info("Eseguo il check iniziale del bollettino all'avvio.")
+    # Carica lo stato iniziale
+    await _load_state_from_file_async()
+    
+    # Esegui il check iniziale subito dopo aver caricato lo stato
     await check_and_send_bollettino()
+
+    # Mantieni il loop attivo indefinitamente
+    while True:
+        await asyncio.sleep(3600) # Dormi per un'ora per non consumare CPU, lo scheduler si occuperà del resto
+
+def start_bot_in_thread():
+    """Avvia il loop principale del bot in un thread separato."""
+    global _bot_loop
+    # Crea un nuovo event loop per questo thread e impostalo come corrente
+    _bot_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_bot_loop)
+    try:
+        _bot_loop.run_until_complete(_bot_main_loop())
+    except KeyboardInterrupt:
+        logger.info("Interruzione del thread del bot.")
+    finally:
+        if _scheduler and _scheduler.running:
+            _scheduler.shutdown()
+            logger.info("Scheduler del bot arrestato.")
+        if _bot_loop and not _bot_loop.is_closed():
+            _bot_loop.close()
+            logger.info("Event loop del bot chiuso.")
+
+def trigger_manual_check_from_flask():
+    """
+    Funzione per innescare un controllo manuale dal thread di Flask.
+    Invia un task all'event loop del bot.
+    """
+    global _bot_loop
+    if _bot_loop and not _bot_loop.is_closed():
+        # Usa call_soon_threadsafe per programmare la coroutine nel loop del bot
+        # da un altro thread.
+        _bot_loop.call_soon_threadsafe(asyncio.create_task, check_and_send_bollettino())
+        logger.info("Task 'check_and_send_bollettino' programmato nel loop del bot.")
+        return True
+    else:
+        logger.error("Impossibile innescare il controllo manuale: l'event loop del bot non è attivo.")
+        return False
+
+# Non è più necessario `start_scheduler`, `stop_scheduler`, `initial_check`
+# come funzioni pubbliche da chiamare da app.py, perché sono gestite da _bot_main_loop.
+# `load_state_from_file` è diventata `_load_state_from_file_async` e chiamata internamente.
