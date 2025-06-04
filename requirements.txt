@@ -3,5 +3,6 @@ requests
 beautifulsoup4
 python-telegram-bot
 SQLAlchemy
-asyncpg         # Nuovo!
-psycopg2-binary # Necessario per _init_db_engine anche se asyncpg è per la parte async
+asyncpg
+psycopg2-binary
+gunicorn  # Aggiungi questa riga
