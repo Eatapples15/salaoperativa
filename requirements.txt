@@ -1,8 +1,7 @@
+Flask
 requests
 beautifulsoup4
-python-telegram-bot==22.1
-APScheduler
-Flask
-pytz
-# Se useremo una persistenza più complessa, potremmo aggiungere:
-# simplejson (per una gestione JSON più robusta se necessario, ma il modulo json standard Python va bene per questo caso)
+python-telegram-bot
+SQLAlchemy
+asyncpg         # Nuovo!
+psycopg2-binary # Necessario per _init_db_engine anche se asyncpg è per la parte async
