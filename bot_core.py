@@ -1,363 +1,279 @@
 import os
-import logging
-from datetime import datetime, date, timedelta
-import asyncio
 import requests
 from bs4 import BeautifulSoup
-import re
-from telegram import Bot
-from telegram.constants import ParseMode
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import pytz
-import json
+import telegram
+from datetime import datetime
+import asyncio
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
 
-# --- Configurazione del Logging ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# --- Configurazione del Bot ---
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+CANALE_PROTEZIONE_CIVILE_ID = os.getenv('CANALE_PROTEZIONE_CIVILE_ID')
+DATABASE_URL = os.getenv('DATABASE_URL') # La stringa di connessione a Neon.tech
 
-# --- Variabili d'Ambiente ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CANALE_PROTEZIONE_CIVILE_ID = os.getenv("CANALE_PROTEZIONE_CIVILE_ID")
-# Modifica qui: il percorso del file di stato ora viene dalla variabile d'ambiente
-STATE_FILE = os.path.join(os.getenv("STATE_FILE_PATH", "."), "bot_state.json")
+bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
 
-# --- Variabili Globali per il Bot (gestite centralmente nell'event loop) ---
-_last_bollettino_link = None
-_last_bollettino_date = None # Data del bollettino più recente trovato sul sito
-_last_successful_check_time = None
-_last_check_status = "In attesa del primo controllo."
-_state_load_time = None
-# NUOVA VARIABILE: Traccia la data del bollettino odierno che è stato inviato con successo.
-_last_sent_bulletin_for_today = None
+# --- Variabili di Stato del Bot (verranno caricate/salvate dal DB) ---
+# Contengono lo stato del bot che deve persistere tra i riavvii.
+# Inizializzate come None, verranno caricate dal DB all'avvio.
+bot_state = {
+    'last_bulletin_url': None,
+    'last_sent_timestamp': None,
+    'last_check_timestamp': None # Questo può non essere persistito nel DB se non strettamente necessario
+}
 
-# --- Costanti per lo Scraping ---
-URL_BOLLETTINO = "https://centrofunzionale.regione.basilicata.it/it/bollettini-avvisi.php?lt=A"
-BASE_URL_SITO = "https://centrofunzionale.regione.basilicata.it"
+# --- Funzioni di gestione del Database ---
 
-# --- Inizializzazione Bot Telegram e Scheduler (gestiti internamente al thread del bot) ---
-_bot = None
-_scheduler = None
-_bot_loop = None # L'event loop principale del bot
+# Usa create_async_engine per connessioni asincrone, compatibile con asyncio
+async_engine = None
 
-# --- Configurazione Fuso Orario ---
-ROME_TZ = pytz.timezone('Europe/Rome')
-
-
-# --- Funzioni di Persistenza dello Stato (async) ---
-async def _load_state_from_file_async():
-    """Carica lo stato del bot da file. Deve essere eseguita nell'event loop del bot."""
-    global _last_bollettino_link, _last_bollettino_date, _last_successful_check_time, _last_check_status, _state_load_time, _last_sent_bulletin_for_today
-    try:
-        if os.path.exists(STATE_FILE):
-            with open(STATE_FILE, 'r') as f:
-                state = json.load(f)
-            
-            _last_bollettino_link = state.get('last_bollettino_link')
-            
-            date_str = state.get('last_bollettino_date')
-            _last_bollettino_date = datetime.fromisoformat(date_str).date() if date_str else None
-
-            # Carica la nuova variabile di stato
-            sent_today_str = state.get('last_sent_bulletin_for_today')
-            _last_sent_bulletin_for_today = datetime.fromisoformat(sent_today_str).date() if sent_today_str else None
-
-            time_str = state.get('last_successful_check_time')
-            if time_str:
-                _last_successful_check_time = datetime.fromisoformat(time_str)
-                if _last_successful_check_time.tzinfo is None:
-                    _last_successful_check_time = ROME_TZ.localize(_last_successful_check_time)
-            else:
-                _last_successful_check_time = None
-            
-            _last_check_status = state.get('last_check_status', "Stato caricato dal file.")
-            _state_load_time = datetime.now(ROME_TZ)
-
-            logger.info(f"Stato del bot caricato da {STATE_FILE}.")
-            logger.info(f"Ultimo bollettino caricato (generale): {_last_bollettino_date} ({_last_bollettino_link})")
-            logger.info(f"Ultimo bollettino *del giorno* inviato (persisted): {_last_sent_bulletin_for_today}")
-            logger.info(f"Ultimo check riuscito caricato: {_last_successful_check_time}")
+async def _init_db_engine():
+    """Inizializza l'engine del database."""
+    global async_engine
+    if async_engine is None:
+        if not DATABASE_URL:
+            print("Errore: DATABASE_URL non impostata. Impossibile connettersi al database.")
+            return False
+        # Aggiungi '?sslmode=require' se non è già presente nella stringa di connessione di Neon.tech
+        # Neon.tech richiede SSL
+        if 'sslmode=require' not in DATABASE_URL:
+            db_url_with_ssl = f"{DATABASE_URL}?sslmode=require"
         else:
-            logger.info(f"File di stato '{STATE_FILE}' non trovato. Avvio con stato vuoto.")
-            _state_load_time = datetime.now(ROME_TZ)
-    except Exception as e:
-        logger.error(f"Errore durante il caricamento dello stato dal file {STATE_FILE}: {e}")
-        _last_check_status = "Errore durante il caricamento dello stato dal file."
-        _state_load_time = datetime.now(ROME_TZ)
+            db_url_with_ssl = DATABASE_URL
+        
+        # Sostituisci postgresql:// con postgresql+asyncpg:// per asyncpg
+        async_db_url = db_url_with_ssl.replace("postgresql://", "postgresql+asyncpg://")
 
-async def _save_state_to_file_async():
-    """Salva lo stato del bot su file. Deve essere eseguita nell'event loop del bot."""
-    global _last_bollettino_link, _last_bollettino_date, _last_successful_check_time, _last_check_status, _last_sent_bulletin_for_today
-    try:
-        state = {
-            'last_bollettino_link': _last_bollettino_link,
-            'last_bollettino_date': _last_bollettino_date.isoformat() if _last_bollettino_date else None,
-            'last_successful_check_time': _last_successful_check_time.isoformat() if _last_successful_check_time else None,
-            'last_check_status': _last_check_status,
-            # Salva la nuova variabile di stato
-            'last_sent_bulletin_for_today': _last_sent_bulletin_for_today.isoformat() if _last_sent_bulletin_for_today else None
-        }
-        # Assicurati che la directory esista prima di scrivere il file
-        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=4)
-        logger.info(f"Stato del bot salvato in {STATE_FILE}.")
-    except Exception as e:
-        logger.error(f"Errore durante il salvataggio dello stato nel file {STATE_FILE}: {e}")
+        print(f"Tentativo di connessione al database: {async_db_url.split('@')[0]}@...") # Non stampare la password
+        try:
+            async_engine = create_async_engine(async_db_url, echo=False) # echo=True per vedere le query SQL nei log
+            async with async_engine.connect() as conn:
+                await conn.execute(text("SELECT 1")) # Prova una query semplice per verificare la connessione
+            print("Connessione al database riuscita.")
+            return True
+        except Exception as e:
+            print(f"Errore nella connessione al database: {e}")
+            async_engine = None # Reset engine in caso di errore
+            return False
+    return True
+
+async def _create_state_table_async():
+    """Crea la tabella 'bot_state' se non esiste."""
+    global async_engine
+    if async_engine is None:
+        print("Errore: Engine del database non inizializzato. Impossibile creare la tabella.")
+        return
+
+    create_table_sql = text("""
+        CREATE TABLE IF NOT EXISTS bot_state (
+            id SERIAL PRIMARY KEY,
+            last_bulletin_url TEXT,
+            last_sent_timestamp TIMESTAMP
+        );
+    """)
+    async with async_engine.begin() as conn: # begin() crea una transazione e la committa
+        await conn.execute(create_table_sql)
+    print("Tabella 'bot_state' verificata/creata con successo.")
+
+async def _load_state_from_db_async():
+    """Carica lo stato del bot dal database."""
+    global bot_state, async_engine
+    if async_engine is None:
+        print("Errore: Engine del database non inizializzato. Impossibile caricare lo stato.")
+        return
+
+    async with async_engine.connect() as conn:
+        result = await conn.execute(text("SELECT last_bulletin_url, last_sent_timestamp FROM bot_state WHERE id = 1"))
+        row = result.fetchone()
+        if row:
+            bot_state['last_bulletin_url'] = row[0]
+            bot_state['last_sent_timestamp'] = row[1]
+            print(f"Stato del bot caricato dal database: {bot_state}")
+        else:
+            print("Nessuno stato trovato nel database. Avvio con stato vuoto.")
+            # Inserisci una riga iniziale se la tabella è vuota
+            await _save_state_to_db_async(None, None) # Inserisce la riga 1 vuota
 
 
-# --- Funzione di Scraping Corretta (async - nota: requests è sincrono, quindi non è awaitable di per sé) ---
-async def get_bollettino_info():
+async def _save_state_to_db_async(bulletin_url, sent_timestamp):
+    """Salva lo stato del bot nel database."""
+    global bot_state, async_engine
+    if async_engine is None:
+        print("Errore: Engine del database non inizializzato. Impossibile salvare lo stato.")
+        return
+
+    bot_state['last_bulletin_url'] = bulletin_url
+    bot_state['last_sent_timestamp'] = sent_timestamp
+
+    # Aggiorna o inserisci la riga con id=1 (che sarà l'unica riga per lo stato globale del bot)
+    # UPSERT: se la riga esiste, aggiornala; altrimenti, inseriscila.
+    # PostgreSQL usa ON CONFLICT per l'UPSERT
+    upsert_sql = text("""
+        INSERT INTO bot_state (id, last_bulletin_url, last_sent_timestamp)
+        VALUES (1, :bulletin_url, :sent_timestamp)
+        ON CONFLICT (id) DO UPDATE SET
+            last_bulletin_url = EXCLUDED.last_bulletin_url,
+            last_sent_timestamp = EXCLUDED.last_sent_timestamp;
+    """)
+
+    async with async_engine.begin() as conn:
+        await conn.execute(upsert_sql, {
+            'bulletin_url': bot_state['last_bulletin_url'],
+            'sent_timestamp': bot_state['last_sent_timestamp']
+        })
+    print(f"Stato del bot salvato nel database: {bot_state}")
+
+# --- Funzioni del Bot ---
+
+async def get_latest_bulletin_data():
     """
-    Funzione per scaricare e parsare le informazioni del bollettino dalla pagina
-    della Protezione Civile Basilicata.
+    Funzione per ottenere il link dell'ultimo bollettino dalla pagina.
+    Restituisce un tuple (link, data_bollettino_str) o (None, None) in caso di errore/non trovato.
     """
-    current_bollettino_link = None
-    current_bollettino_date = None
-
+    url = "https://centrofunzionale.regione.basilicata.it/bollettini-di-criticita/"
     try:
-        logger.info(f"Tentativo di scaricare il bollettino da: {URL_BOLLETTINO}")
-        response = await asyncio.to_thread(requests.get, URL_BOLLETTINO, timeout=15)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
-
         soup = BeautifulSoup(response.text, 'html.parser')
 
-        bollettino_entries = soup.find_all('div', class_='one-pdf')
-        logger.info(f"Trovati {len(bollettino_entries)} elementi 'one-pdf'.")
+        # Cerca il div con id "content"
+        content_div = soup.find('div', id='content')
+        if not content_div:
+            print("Div 'content' non trovato.")
+            return None, None
 
-        for entry in bollettino_entries:
-            link_element = entry.find('a', href=True)
-            
-            if link_element:
-                current_link_from_entry = link_element['href']
-                
-                if not current_link_from_entry.startswith('http'):
-                    current_link_from_entry = BASE_URL_SITO + current_link_from_entry
-                
-                date_text_from_entry = link_element.get_text(strip=True)
-                
-                match = re.search(r'del\s+(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})', date_text_from_entry, re.IGNORECASE)
-                
+        # Cerca il link più recente che contiene "Bollettino_Criticita_Regione_Basilicata" e ".pdf"
+        # Ordina per trovare il più recente in base alla data nel nome del file
+        links = content_div.find_all('a', href=True)
+        bulletin_links = []
+        for link in links:
+            href = link['href']
+            if "Bollettino_Criticita_Regione_Basilicata" in href and ".pdf" in href:
+                # Estrai la data dal nome del file (es. 03_06_2025)
+                match = re.search(r'_(\d{2}_\d{2}_\d{4})\.pdf', href)
                 if match:
-                    day = match.group(1)
-                    month_name = match.group(2).lower()
-                    year = match.group(3)
+                    date_str = match.group(1)
+                    try:
+                        # Converti la data in un oggetto datetime per il confronto
+                        bulletin_date = datetime.strptime(date_str, '%d_%m_%Y')
+                        bulletin_links.append((bulletin_date, href))
+                    except ValueError:
+                        continue # Salta link con data non valida
 
-                    mesi_numeri = {
-                        'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
-                        'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08', # 'giugno' corretto da '05' a '06'
-                        'settembre': '09', 'ottobre': '10', 'novembre': '11', 'dicembre': '12'
-                    }
-                    
-                    month_num = mesi_numeri.get(month_name)
+        if not bulletin_links:
+            print("Nessun link del bollettino trovato.")
+            return None, None
 
-                    if month_num:
-                        date_str_formatted = f"{day}/{month_num}/{year}"
-                        try:
-                            current_bollettino_date = datetime.strptime(date_str_formatted, "%d/%m/%Y").date()
-                            logger.info(f"Data parsata con successo: {current_bollettino_date}")
-                            current_bollettino_link = current_link_from_entry
-                            break # Il primo che troviamo è il più recente dato l'ordine HTML.
-                        except ValueError as ve:
-                            logger.warning(f"Formato data '{date_str_formatted}' non valido. Errore: {ve}. Impossibile parsare la data.")
-                    else:
-                        logger.warning(f"Nome mese '{month_name}' non riconosciuto. Impossibile parsare la data.")
-                else:
-                    logger.warning(f"Pattern data non trovato nella stringa '{date_text_from_entry}'.")
-            else:
-                logger.warning(f"Manca l'elemento link in un 'one-pdf' entry.")
-                
-        if not current_bollettino_link:
-            logger.warning("Nessun link al bollettino trovato con la logica attuale.")
-        if not current_bollettino_date:
-            logger.warning("Nessuna data del bollettino valida trovata con la logica attuale.")
+        # Trova il bollettino più recente
+        latest_bulletin = max(bulletin_links, key=lambda item: item[0])
+        latest_link = latest_bulletin[1]
+        latest_date_str = latest_bulletin[0].strftime('%d/%m/%Y')
+        
+        print(f"Ultimo bollettino trovato: {latest_link} del {latest_date_str}")
+        return latest_link, latest_date_str
 
-        return current_bollettino_link, current_bollettino_date
-
-    except requests.exceptions.Timeout:
-        logger.error(f"Timeout durante la richiesta HTTP a {URL_BOLLETTINO}")
-        return None, None
     except requests.exceptions.RequestException as e:
-        logger.error(f"Errore durante la richiesta HTTP per il bollettino: {e}")
+        print(f"Errore durante la richiesta HTTP: {e}")
         return None, None
     except Exception as e:
-        logger.exception(f"Errore inatteso durante il parsing del bollettino: {e}")
+        print(f"Errore generico durante il parsing del bollettino: {e}")
         return None, None
 
-# --- Funzione di Check e Invio Telegram (modificata per "più recente" e persistenza) ---
-async def check_and_send_bollettino():
+async def send_bulletin_to_telegram(bulletin_url, bulletin_date_str):
+    """Invia il link del bollettino al canale Telegram."""
+    if not CANALE_PROTEZIONE_CIVILE_ID:
+        print("ID del canale Telegram non impostato. Impossibile inviare il messaggio.")
+        return
+
+    message_text = (
+        "📢 **Nuovo Bollettino di Criticità - Protezione Civile Basilicata**\n\n"
+        f"🗓️ **Data del Bollettino:** {bulletin_date_str}\n"
+        f"🔗 [Scarica il Bollettino]({bulletin_url})\n\n"
+        "Si prega di consultare il bollettino per tutti i dettagli."
+    )
+    try:
+        await bot.send_message(chat_id=CANALE_PROTEZIONE_CIVILE_ID, text=message_text, parse_mode=telegram.ParseMode.MARKDOWN)
+        print(f"Bollettino {bulletin_url} inviato con successo a Telegram.")
+        return True
+    except telegram.error.TelegramError as e:
+        print(f"Errore nell'invio del messaggio a Telegram: {e}")
+        return False
+    except Exception as e:
+        print(f"Errore generico nell'invio del messaggio a Telegram: {e}")
+        return False
+
+async def check_for_new_bulletin():
     """
-    Controlla se c'è un nuovo bollettino (il più recente) e lo invia al canale Telegram.
-    Questa funzione viene eseguita all'interno dell'event loop principale del bot.
+    Controlla la presenza di un nuovo bollettino e lo invia se diverso dall'ultimo salvato.
     """
-    global _last_bollettino_link, _last_bollettino_date, _last_successful_check_time, _last_check_status, _bot, _last_sent_bulletin_for_today
+    global bot_state
+    print(f"Eseguo controllo per nuovo bollettino alle {datetime.now().strftime('%H:%M:%S')}")
 
-    logger.info("Avvio controllo aggiornamento bollettino per invio Telegram...")
+    # Aggiorna il timestamp dell'ultima verifica
+    bot_state['last_check_timestamp'] = datetime.now()
 
-    link, new_date = await get_bollettino_info()
+    latest_bulletin_url, latest_bulletin_date_str = await get_latest_bulletin_data()
 
-    current_check_time = datetime.now(ROME_TZ)
-    today_date = date.today() # Data odierna senza ora
+    if latest_bulletin_url:
+        print(f"Ultimo bollettino online: {latest_bulletin_url}")
+        print(f"Ultimo bollettino inviato (dal DB): {bot_state.get('last_bulletin_url')}")
 
-    if link and new_date:
-        # PRIMO CONTROLLO: È il bollettino di oggi e lo abbiamo già inviato oggi?
-        # Questo impedisce invii multipli dello stesso bollettino *del giorno* in un singolo giorno.
-        if new_date == today_date and _last_sent_bulletin_for_today == today_date:
-            logger.info(f"Bollettino del {new_date.strftime('%d/%m/%Y')} (link: {link}) è il bollettino di oggi ed è già stato inviato oggi. Salto l'invio.")
-            _last_successful_check_time = current_check_time
-            _last_check_status = f"Ultimo bollettino: {new_date.strftime('%d/%m/%Y')} ({link}). Stato: Già inviato oggi."
-            await _save_state_to_file_async() # Salva lo stato anche se non invii, per aggiornare il tempo dell'ultimo check
-            return # Esci dalla funzione, non c'è bisogno di ulteriori controlli o invii
+        if latest_bulletin_url != bot_state.get('last_bulletin_url'):
+            print("Trovato un nuovo bollettino! Invio a Telegram...")
+            success = await send_bulletin_to_telegram(latest_bulletin_url, latest_bulletin_date_str)
+            if success:
+                await _save_state_to_db_async(latest_bulletin_url, datetime.now())
+                print(f"Nuovo bollettino ({latest_bulletin_url}) inviato e stato aggiornato nel DB.")
+                return True # Nuovo bollettino trovato e inviato
+            else:
+                print("Invio del bollettino fallito. Lo stato non è stato aggiornato.")
+                return False # Invio fallito
+        else:
+            print("Nessun nuovo bollettino. Ultimo bollettino online è lo stesso dell'ultimo inviato.")
+            return False # Nessun nuovo bollettino
+    else:
+        print("Non è stato possibile recuperare il link dell'ultimo bollettino online.")
+        return False # Nessun bollettino valido recuperato
 
-        # SECONDO CONTROLLO: Il bollettino è più recente rispetto all'ultimo che abbiamo MAI visto,
-        # O è la stessa data ma il link è cambiato (potrebbe essere una revisione del bollettino del giorno).
-        if _last_bollettino_date is None or \
-           new_date > _last_bollettino_date or \
-           (new_date == _last_bollettino_date and link != _last_bollettino_link):
-            try:
-                if not _bot:
-                    raise ValueError("Bot Telegram non inizializzato (_bot è None).")
-                if not CANALE_PROTEZIONE_CIVILE_ID:
-                    raise ValueError("ID canale canale Telegram non configurato (CANALE_PROTEZIONE_CIVILE_ID mancante).")
-
-                data_formattata = new_date.strftime("%d/%m/%Y")
-                
-                message = (
-                    f"🔔 *Nuovo Bollettino di Criticità Regionale disponibile!* 🔔\n\n"
-                    f"🗓 Data: `{data_formattata}`\n"
-                    f"🔗 [Scarica il bollettino]({link})\n\n"
-                    f"Rimani aggiornato sulla situazione."
-                )
-                
-                await _bot.send_message(
-                    chat_id=CANALE_PROTEZIONE_CIVILE_ID,
-                    text=message,
-                    parse_mode=ParseMode.MARKDOWN,
-                    disable_web_page_preview=True
-                )
-                logger.info(f"Bollettino del {data_formattata} (link: {link}) inviato con successo a Telegram.")
-                
-                # Aggiorna le variabili di stato dopo l'invio riuscito
-                _last_bollettino_link = link
-                _last_bollettino_date = new_date
-                _last_successful_check_time = current_check_time
-                _last_check_status = f"Ultimo bollettino: {data_formattata} ({link}). Stato: Inviato (più recente)."
-                
-                # Se il bollettino che stiamo inviando è quello del giorno corrente,
-                # registriamo che un bollettino odierno è stato inviato.
-                if new_date == today_date:
-                    _last_sent_bulletin_for_today = today_date
-                    logger.info(f"Registrato invio del bollettino di oggi: {today_date.strftime('%Y-%m-%d')}")
-                else:
-                    logger.info(f"Bollettino inviato ({new_date.strftime('%Y-%m-%d')}) non è quello odierno. Non aggiorniamo '_last_sent_bulletin_for_today'.")
-                    # Questo garantisce che se per qualche motivo inviamo un bollettino di ieri (perché è ancora il più recente),
-                    # il flag _last_sent_bulletin_for_today non viene impostato per la data odierna,
-                    # permettendo l'invio del vero bollettino di oggi quando uscirà.
-
-                await _save_state_to_file_async()
-                
-            except ValueError as ve:
-                logger.error(f"Errore di configurazione Telegram: {ve}")
-                _last_check_status = f"Errore configurazione Telegram: {ve}"
-                _last_successful_check_time = current_check_time
-                await _save_state_to_file_async() # Salva lo stato anche in caso di errore di invio
-            except Exception as e:
-                logger.exception(f"Errore durante l'invio del messaggio Telegram: {e}")
-                _last_check_status = f"Errore invio Telegram: {e}"
-                _last_successful_check_time = current_check_time
-                await _save_state_to_file_async() # Salva lo stato anche in caso di errore generico
-
-        else: # Il bollettino trovato non è più recente o non è cambiato rispetto all'ultimo visto
-            logger.info(f"Bollettino del {new_date.strftime('%d/%m/%Y')} (link: {link}) già presente o più vecchio. Nessun nuovo invio generale.")
-            _last_successful_check_time = current_check_time
-            _last_check_status = f"Ultimo bollettino: {new_date.strftime('%d/%m/%Y')} ({link}). Stato: Già presente e non più recente."
-            await _save_state_to_file_async() # Salva lo stato anche se non invii, per aggiornare il tempo dell'ultimo check
-
-    else: # link o new_date sono None
-        logger.warning("Impossibile recuperare il link o la data del bollettino dal sito.")
-        _last_check_status = "Impossibile recuperare il bollettino dal sito. Controllare i log."
-        _last_successful_check_time = current_check_time
-        await _save_state_to_file_async() # Salva lo stato anche in caso di errore di recupero
-
-
-# --- Funzione per ottenere lo stato del bot (thread-safe) ---
-def get_bot_status():
-    """Restituisce lo stato corrente del bot per l'API Flask."""
+async def get_bot_status():
+    """Restituisce lo stato attuale del bot per la dashboard."""
     return {
-        "last_bollettino_link": _last_bollettino_link,
-        "last_bollettino_date": str(_last_bollettino_date) if _last_bollettino_date else "N/A",
-        "last_sent_bulletin_for_today": str(_last_sent_bulletin_for_today) if _last_sent_bulletin_for_today else "N/A", # Aggiunto qui per la dashboard
-        "last_successful_check_time": _last_successful_check_time.isoformat() if _last_successful_check_time else "N/A",
-        "last_check_status": _last_check_status,
-        "state_load_time": _state_load_time.isoformat() if _state_load_time else "N/A"
+        "current_time": datetime.now().strftime("%d %B %Y alle %H:%M:%S"),
+        "last_bulletin_found": bot_state.get('last_bulletin_url'),
+        "last_check_timestamp": bot_state.get('last_check_timestamp', 'N/A').strftime("%d %B %Y alle %H:%M:%S") if bot_state.get('last_check_timestamp') else 'N/A',
+        "last_bulletin_sent_timestamp": bot_state.get('last_sent_timestamp', 'N/A').strftime("%d %B %Y alle %H:%M:%S") if bot_state.get('last_sent_timestamp') else 'N/A',
+        "persistent_load_status": f"Stato caricato dal DB: {bot_state.get('last_bulletin_url')}" if bot_state.get('last_bulletin_url') else "Stato iniziale (DB vuoto o errore)",
+        "general_state_summary": f"Ultimo bollettino inviato: {os.path.basename(bot_state.get('last_bulletin_url', 'N/A'))}. Controllato: {bot_state.get('last_check_timestamp', 'N/A').strftime('%H:%M:%S') if bot_state.get('last_check_timestamp') else 'N/A'}"
     }
 
-# --- Funzioni di gestione dell'event loop e scheduler (esposte per app.py) ---
-async def _bot_main_loop():
-    """
-    Funzione principale che esegue l'event loop del bot.
-    Inizializza il bot, lo scheduler e gestisce i task.
-    """
-    global _bot, _scheduler, _bot_loop
+async def trigger_manual_check_from_flask():
+    """Funzione per innescare un controllo manuale da Flask."""
+    print("Richiesta di controllo manuale ricevuta.")
+    return await check_for_new_bulletin()
 
-    _bot_loop = asyncio.get_running_loop() # Ottieni il loop corrente
-
-    if TELEGRAM_BOT_TOKEN:
-        _bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        logger.info("Bot Telegram inizializzato.")
+# --- Funzione di inizializzazione per l'avvio del bot ---
+async def initialize_bot():
+    """Inizializza il database e carica lo stato all'avvio del bot."""
+    if await _init_db_engine():
+        await _create_state_table_async()
+        await _load_state_from_db_async()
     else:
-        logger.error("TELEGRAM_BOT_TOKEN non è configurato. Il bot non potrà inviare messaggi.")
-        _bot = None
+        print("Avviso: Il bot continuerà senza persistenza del database a causa di un errore di connessione.")
 
-    _scheduler = AsyncIOScheduler(timezone=ROME_TZ)
-    _scheduler.add_job(check_and_send_bollettino, 'interval', minutes=15)
-    _scheduler.start()
-    logger.info("Scheduler avviato. Controllo bollettino ogni 15 minuti.")
-
-    # Carica lo stato iniziale
-    await _load_state_from_file_async()
+# Questo è cruciale: chiama la funzione di inizializzazione all'avvio dell'applicazione.
+# Verrà richiamato da app.py
+if __name__ == '__main__':
+    # Questo blocco viene eseguito solo se esegui bot_core.py direttamente
+    # Non verrà eseguito quando importato da app.py
+    async def main_test():
+        await initialize_bot()
+        # Puoi aggiungere qui dei test manuali
+        # await check_for_new_bulletin()
+        status = await get_bot_status()
+        print("\n--- Stato del Bot ---")
+        for key, value in status.items():
+            print(f"{key}: {value}")
     
-    # Esegui il check iniziale subito dopo aver caricato lo stato
-    # Questo è cruciale per ripristinare lo stato dopo un riavvio e agire di conseguenza.
-    await check_and_send_bollettino()
-
-    # Mantieni il loop attivo indefinitamente
-    while True:
-        await asyncio.sleep(3600) # Dormi per un'ora per non consumare CPU, lo scheduler si occuperà del resto
-
-def start_bot_in_thread():
-    """Avvia il loop principale del bot in un thread separato."""
-    global _bot_loop
-    _bot_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(_bot_loop)
-    try:
-        _bot_loop.run_until_complete(_bot_main_loop())
-    except KeyboardInterrupt:
-        logger.info("Interruzione del thread del bot.")
-    finally:
-        if _scheduler and _scheduler.running:
-            _scheduler.shutdown()
-            logger.info("Scheduler del bot arrestato.")
-        if _bot_loop and not _bot_loop.is_closed():
-            _bot_loop.close()
-            logger.info("Event loop del bot chiuso.")
-
-def trigger_manual_check_from_flask():
-    """
-    Funzione per innescare un controllo manuale dal thread di Flask.
-    Invia un task all'event loop del bot.
-    """
-    global _bot_loop
-    if _bot_loop and not _bot_loop.is_closed():
-        # Usa call_soon_threadsafe per programmare la coroutine nel loop del bot
-        # da un altro thread.
-        # È importante passare la coroutine senza await (check_and_send_bollettino())
-        # e lasciare a asyncio.create_task il compito di schedularla.
-        _bot_loop.call_soon_threadsafe(asyncio.create_task, check_and_send_bollettino())
-        logger.info("Task 'check_and_send_bollettino' programmato nel loop del bot.")
-        return True
-    else:
-        logger.error("Impossibile innescare il controllo manuale: l'event loop del bot non è attivo.")
-        return False
+    asyncio.run(main_test())
