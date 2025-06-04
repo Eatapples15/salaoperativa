@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 # --- Variabili d'Ambiente ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CANALE_PROTEZIONE_CIVILE_ID = os.getenv("CANALE_PROTEZIONE_CIVILE_ID")
-STATE_FILE = "bot_state.json" # Assicurati che questo file sia persistente su Render.com
+# Modifica qui: il percorso del file di stato ora viene dalla variabile d'ambiente
+STATE_FILE = os.path.join(os.getenv("STATE_FILE_PATH", "."), "bot_state.json")
 
 # --- Variabili Globali per il Bot (gestite centralmente nell'event loop) ---
 _last_bollettino_link = None
@@ -29,8 +30,8 @@ _last_bollettino_date = None # Data del bollettino più recente trovato sul sito
 _last_successful_check_time = None
 _last_check_status = "In attesa del primo controllo."
 _state_load_time = None
-# NUOVA VARIABILE: Traccia la data del bollettino di oggi che è stato inviato.
-_last_sent_bulletin_for_today = None # Data del bollettino odierno che è stato inviato (resetta a mezzanotte)
+# NUOVA VARIABILE: Traccia la data del bollettino odierno che è stato inviato con successo.
+_last_sent_bulletin_for_today = None
 
 # --- Costanti per lo Scraping ---
 URL_BOLLETTINO = "https://centrofunzionale.regione.basilicata.it/it/bollettini-avvisi.php?lt=A"
@@ -59,6 +60,7 @@ async def _load_state_from_file_async():
             date_str = state.get('last_bollettino_date')
             _last_bollettino_date = datetime.fromisoformat(date_str).date() if date_str else None
 
+            # Carica la nuova variabile di stato
             sent_today_str = state.get('last_sent_bulletin_for_today')
             _last_sent_bulletin_for_today = datetime.fromisoformat(sent_today_str).date() if sent_today_str else None
 
@@ -75,7 +77,7 @@ async def _load_state_from_file_async():
 
             logger.info(f"Stato del bot caricato da {STATE_FILE}.")
             logger.info(f"Ultimo bollettino caricato (generale): {_last_bollettino_date} ({_last_bollettino_link})")
-            logger.info(f"Ultimo bollettino *del giorno* inviato: {_last_sent_bulletin_for_today}")
+            logger.info(f"Ultimo bollettino *del giorno* inviato (persisted): {_last_sent_bulletin_for_today}")
             logger.info(f"Ultimo check riuscito caricato: {_last_successful_check_time}")
         else:
             logger.info(f"File di stato '{STATE_FILE}' non trovato. Avvio con stato vuoto.")
@@ -94,8 +96,11 @@ async def _save_state_to_file_async():
             'last_bollettino_date': _last_bollettino_date.isoformat() if _last_bollettino_date else None,
             'last_successful_check_time': _last_successful_check_time.isoformat() if _last_successful_check_time else None,
             'last_check_status': _last_check_status,
+            # Salva la nuova variabile di stato
             'last_sent_bulletin_for_today': _last_sent_bulletin_for_today.isoformat() if _last_sent_bulletin_for_today else None
         }
+        # Assicurati che la directory esista prima di scrivere il file
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
         with open(STATE_FILE, 'w') as f:
             json.dump(state, f, indent=4)
         logger.info(f"Stato del bot salvato in {STATE_FILE}.")
@@ -142,7 +147,7 @@ async def get_bollettino_info():
 
                     mesi_numeri = {
                         'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
-                        'maggio': '05', 'giugno': '05', 'luglio': '07', 'agosto': '08', # ATTENZIONE: Giugno e Luglio erano 05 e 07. Ho corretto Giugno a 06.
+                        'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08', # 'giugno' corretto da '05' a '06'
                         'settembre': '09', 'ottobre': '10', 'novembre': '11', 'dicembre': '12'
                     }
                     
@@ -198,6 +203,7 @@ async def check_and_send_bollettino():
 
     if link and new_date:
         # PRIMO CONTROLLO: È il bollettino di oggi e lo abbiamo già inviato oggi?
+        # Questo impedisce invii multipli dello stesso bollettino *del giorno* in un singolo giorno.
         if new_date == today_date and _last_sent_bulletin_for_today == today_date:
             logger.info(f"Bollettino del {new_date.strftime('%d/%m/%Y')} (link: {link}) è il bollettino di oggi ed è già stato inviato oggi. Salto l'invio.")
             _last_successful_check_time = current_check_time
@@ -205,8 +211,8 @@ async def check_and_send_bollettino():
             await _save_state_to_file_async() # Salva lo stato anche se non invii, per aggiornare il tempo dell'ultimo check
             return # Esci dalla funzione, non c'è bisogno di ulteriori controlli o invii
 
-        # SECONDO CONTROLLO: Il bollettino è più recente o è lo stesso ma con link diverso?
-        # (Questo gestisce anche il caso del primo invio in assoluto o il cambio del bollettino del giorno)
+        # SECONDO CONTROLLO: Il bollettino è più recente rispetto all'ultimo che abbiamo MAI visto,
+        # O è la stessa data ma il link è cambiato (potrebbe essere una revisione del bollettino del giorno).
         if _last_bollettino_date is None or \
            new_date > _last_bollettino_date or \
            (new_date == _last_bollettino_date and link != _last_bollettino_link):
@@ -214,7 +220,7 @@ async def check_and_send_bollettino():
                 if not _bot:
                     raise ValueError("Bot Telegram non inizializzato (_bot è None).")
                 if not CANALE_PROTEZIONE_CIVILE_ID:
-                    raise ValueError("ID canale Telegram non configurato (CANALE_PROTEZIONE_CIVILE_ID mancante).")
+                    raise ValueError("ID canale canale Telegram non configurato (CANALE_PROTEZIONE_CIVILE_ID mancante).")
 
                 data_formattata = new_date.strftime("%d/%m/%Y")
                 
@@ -239,34 +245,31 @@ async def check_and_send_bollettino():
                 _last_successful_check_time = current_check_time
                 _last_check_status = f"Ultimo bollettino: {data_formattata} ({link}). Stato: Inviato (più recente)."
                 
-                # Se il bollettino inviato è quello del giorno corrente, aggiorna la variabile specifica
+                # Se il bollettino che stiamo inviando è quello del giorno corrente,
+                # registriamo che un bollettino odierno è stato inviato.
                 if new_date == today_date:
                     _last_sent_bulletin_for_today = today_date
                     logger.info(f"Registrato invio del bollettino di oggi: {today_date.strftime('%Y-%m-%d')}")
                 else:
-                    logger.info(f"Bollettino inviato ({new_date.strftime('%Y-%m-%d')}) non è quello odierno.")
-                    # Se inviamo un bollettino di un giorno precedente (es. a mezzanotte il bollettino del giorno prima è ancora il più recente),
-                    # dobbiamo assicurarci che _last_sent_bulletin_for_today sia NESSUNO per il GIORNO CORRENTE.
-                    # Questo garantisce che quando arriva il bollettino di oggi, venga inviato.
-                    # Questa logica è un po' più complessa e dipende da cosa intendi per "bollettino del giorno".
-                    # Se intendi "il bollettino che ha data OGGI deve essere inviato solo una volta OGGI", allora la logica sopra è sufficiente.
-                    # Se un bollettino di IERI è ancora il più recente, lo invieresti solo una volta in totale.
-                    # La logica attuale è: "Se il bollettino trovato è il più recente IN ASSOLUTO E se è del giorno corrente, lo invio solo una volta al giorno."
-                    # Consideriamo che se `new_date` non è `today_date`, non aggiorniamo `_last_sent_bulletin_for_today`.
-                    pass
-                
+                    logger.info(f"Bollettino inviato ({new_date.strftime('%Y-%m-%d')}) non è quello odierno. Non aggiorniamo '_last_sent_bulletin_for_today'.")
+                    # Questo garantisce che se per qualche motivo inviamo un bollettino di ieri (perché è ancora il più recente),
+                    # il flag _last_sent_bulletin_for_today non viene impostato per la data odierna,
+                    # permettendo l'invio del vero bollettino di oggi quando uscirà.
+
                 await _save_state_to_file_async()
                 
             except ValueError as ve:
                 logger.error(f"Errore di configurazione Telegram: {ve}")
                 _last_check_status = f"Errore configurazione Telegram: {ve}"
                 _last_successful_check_time = current_check_time
+                await _save_state_to_file_async() # Salva lo stato anche in caso di errore di invio
             except Exception as e:
                 logger.exception(f"Errore durante l'invio del messaggio Telegram: {e}")
                 _last_check_status = f"Errore invio Telegram: {e}"
                 _last_successful_check_time = current_check_time
+                await _save_state_to_file_async() # Salva lo stato anche in caso di errore generico
 
-        else: # Il bollettino trovato non è più recente o non è cambiato
+        else: # Il bollettino trovato non è più recente o non è cambiato rispetto all'ultimo visto
             logger.info(f"Bollettino del {new_date.strftime('%d/%m/%Y')} (link: {link}) già presente o più vecchio. Nessun nuovo invio generale.")
             _last_successful_check_time = current_check_time
             _last_check_status = f"Ultimo bollettino: {new_date.strftime('%d/%m/%Y')} ({link}). Stato: Già presente e non più recente."
@@ -276,7 +279,8 @@ async def check_and_send_bollettino():
         logger.warning("Impossibile recuperare il link o la data del bollettino dal sito.")
         _last_check_status = "Impossibile recuperare il bollettino dal sito. Controllare i log."
         _last_successful_check_time = current_check_time
-        await _save_state_to_file_async() # Salva lo stato anche in caso di errore, per aggiornare il tempo dell'ultimo check
+        await _save_state_to_file_async() # Salva lo stato anche in caso di errore di recupero
+
 
 # --- Funzione per ottenere lo stato del bot (thread-safe) ---
 def get_bot_status():
@@ -284,7 +288,7 @@ def get_bot_status():
     return {
         "last_bollettino_link": _last_bollettino_link,
         "last_bollettino_date": str(_last_bollettino_date) if _last_bollettino_date else "N/A",
-        "last_sent_bulletin_for_today": str(_last_sent_bulletin_for_today) if _last_sent_bulletin_for_today else "N/A",
+        "last_sent_bulletin_for_today": str(_last_sent_bulletin_for_today) if _last_sent_bulletin_for_today else "N/A", # Aggiunto qui per la dashboard
         "last_successful_check_time": _last_successful_check_time.isoformat() if _last_successful_check_time else "N/A",
         "last_check_status": _last_check_status,
         "state_load_time": _state_load_time.isoformat() if _state_load_time else "N/A"
@@ -308,21 +312,7 @@ async def _bot_main_loop():
         _bot = None
 
     _scheduler = AsyncIOScheduler(timezone=ROME_TZ)
-    # Lo scheduler dovrebbe essere configurato per eseguire il check_and_send_bollettino
-    # in orari specifici del giorno, non solo ogni 15 minuti, per catturare i cambi di data.
-    # Ad esempio, potresti voler controllare:
-    # - Ogni 15 minuti come ora
-    # - Una volta a mezzanotte (o poco dopo) per assicurarti che il flag 'sent_for_today' venga 'resetato' implicitamente
-    # Quando la data cambia, _last_sent_bulletin_for_today non sarà più uguale a today_date.
-    # Non serve un reset esplicito a mezzanotte se la logica di confronto è robusta.
-
-    _scheduler.add_job(check_and_send_bollettino, 'interval', minutes=15) # Controlla regolarmente
-
-    # Potresti aggiungere un job a un orario specifico per fare un "refresh" giornaliero, se necessario,
-    # ma la logica attuale dovrebbe già gestire il cambio di data automaticamente.
-    # Esempio: _scheduler.add_job(check_and_send_bollettino, 'cron', hour=0, minute=5, timezone=ROME_TZ)
-    # Questo farebbe un controllo all'00:05 ogni giorno.
-
+    _scheduler.add_job(check_and_send_bollettino, 'interval', minutes=15)
     _scheduler.start()
     logger.info("Scheduler avviato. Controllo bollettino ogni 15 minuti.")
 
@@ -330,6 +320,7 @@ async def _bot_main_loop():
     await _load_state_from_file_async()
     
     # Esegui il check iniziale subito dopo aver caricato lo stato
+    # Questo è cruciale per ripristinare lo stato dopo un riavvio e agire di conseguenza.
     await check_and_send_bollettino()
 
     # Mantieni il loop attivo indefinitamente
@@ -360,6 +351,10 @@ def trigger_manual_check_from_flask():
     """
     global _bot_loop
     if _bot_loop and not _bot_loop.is_closed():
+        # Usa call_soon_threadsafe per programmare la coroutine nel loop del bot
+        # da un altro thread.
+        # È importante passare la coroutine senza await (check_and_send_bollettino())
+        # e lasciare a asyncio.create_task il compito di schedularla.
         _bot_loop.call_soon_threadsafe(asyncio.create_task, check_and_send_bollettino())
         logger.info("Task 'check_and_send_bollettino' programmato nel loop del bot.")
         return True
