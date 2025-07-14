@@ -1,8 +1,0 @@
-Flask
-requests
-beautifulsoup4
-python-telegram-bot
-SQLAlchemy
-asyncpg
-psycopg2-binary
-gunicorn  # Aggiungi questa riga
